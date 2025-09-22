@@ -1,27 +1,9 @@
 version: '3.8'
-
 services:
-  iran-stock-analyzer:
+  brs-api-service:
     build: .
-    container_name: iran-stock-analyzer
-    environment:
-      - BRS_API_KEY=${BRS_API_KEY}
-      - REDIS_URL=redis://redis:6379/0
-    volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
-    depends_on:
-      - redis
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    container_name: iran-stock-redis
     ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
+      - "5000:5000"
+    environment:
+      - BRSAPI_KEY=${BRSAPI_KEY}
     restart: unless-stopped
-
-volumes:
-  redis_data:
