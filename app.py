@@ -7,6 +7,17 @@ load_dotenv()
 
 app = Flask(__name__)
 
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "message": "BRS API Service is running!",
+        "endpoints": {
+            "/": "This page",
+            "/health": "Health check",
+            "/symbols": "Get all symbols from BRS API"
+        }
+    })
+
 @app.route('/symbols', methods=['GET'])
 def get_symbols():
     try:
@@ -47,5 +58,4 @@ def health():
     return jsonify({"status": "healthy"})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
-v
+    app.run(host='0.0.0.0', port=5000, debug=True)
