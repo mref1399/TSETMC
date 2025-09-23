@@ -66,7 +66,7 @@ class SmartMoneyAnalyzer:
         }
 
     def _try_real_api(self, symbol):
-        """تلاش برای دریای"""
+        """تلاش برای دریافت داده واقعی"""
         try:
             url = "http://old.tsetmc.com/tsev2/data/instinfodata.aspx"
             params = {'i': symbol, 'c': '1'}
@@ -74,4 +74,71 @@ class SmartMoneyAnalyzer:
 
             if response.status_code == 200 and response.text.strip():
                 parts = response.text.strip().split(',')
-                if len(parts) >= 8
+                if len(parts) >= 8:
+                    volume = int(float(parts[6].replace(',', ''))) if parts[6] else 0
+                    price = float(parts[2].replace(',', '')) if parts[2] else 0
+
+                    if volume > 0 and price > 0:
+                        return {
+                            'symbol': symbol,
+                            'current_price': price,
+                            'volume': volume,
+                            'value': price * volume,
+                            'timestamp': time.time()
+                        }
+        except:
+            pass
+        return None
+
+    def calculate_smart_money(self, stock_data):
+        """محاسبه پول هوشمند"""
+        if not stock_data:
+            return 0, "تومان"
+
+        volume = stock_data.get('volume', 0)
+        price = stock_data.get('current_price', 0)
+        smart_money = volume * price
+
+        if smart_money >= 1e12:
+            return round(smart_money / 1e12, 2), "هزار میلیارد"
+        elif smart_money >= 1e9:
+            return round(smart_money / 1e9, 2), "میلیارد"
+        elif smart_money >= 1e6:
+            return round(smart_money / 1e6, 2), "میلیون"
+        else:
+            return round(smart_money / 1e3, 2), "هزار"
+
+    def analyze(self):
+        """تحلیل اصلی پول هوشمند"""
+        results = []
+        
+        logger.info(f"🔍 تحلیل {len(self.symbols)} سهم...")
+
+        for symbol in self.symbols:
+            try:
+                stock_data = self.get_stock_data(symbol)
+                if stock_data:
+                    amount, unit = self.calculate_smart_money(stock_data)
+
+                    # فقط جریان‌های قابل توجه
+                    if amount >= 5:  # حداقل 5 میلیون
+                        results.append({
+                            'symbol': symbol,
+                            'smart_money_amount': amount,
+                            'unit': unit + ' تومان',
+                            'current_price': stock_data['current_price'],
+                            'volume': stock_data['volume'],
+                            'raw_value': stock_data['value']
+                        })
+
+            except Exception as e:
+                logger.error(f"خطا در تحلیل {symbol}: {e}")
+
+        # مرتب‌سازی بر اساس مقدار
+        results.sort(key=lambda x: x['raw_value'], reverse=True)
+        return results
+
+def smart_money():
+    """تابع اصلی برای فراخوانی"""
+    analyzer = SmartMoneyAnalyzer()
+    return analyzer.analyze()
