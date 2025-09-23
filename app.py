@@ -9,6 +9,13 @@ load_dotenv()
 
 app = Flask(__name__)
 
+# لیست سیمبل‌های خاص برای بررسی پول هوشمند
+TARGET_SYMBOLS = [
+    'وخارزم', 'فرآور', 'سدور', 'سخاش', 'گشان', 
+    'وساپا', 'ورنا', 'ختوقا', 'فباهنر', 'شرانل', 
+    'شاوان', 'رکیش'
+]
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
@@ -17,9 +24,10 @@ def home():
             "/": "This page",
             "/health": "Health check",
             "/symbols": "Get all symbols from BRS API",
-            "/smart-money": "Detect smart money flow",
+            "/smart-money": "Detect smart money flow for specific symbols",
             "/smart-money/<symbol>": "Get smart money for specific symbol"
-        }
+        },
+        "target_symbols": TARGET_SYMBOLS
     })
 
 @app.route('/symbols', methods=['GET'])
@@ -41,7 +49,8 @@ def get_symbols():
             return jsonify({
                 "success": True,
                 "total_symbols": len(data),
-                "first_3_symbols": data[:3],
+                "target_symbols": TARGET_SYMBOLS,
+                "target_symbols_count": len(TARGET_SYMBOLS),
                 "all_symbols": data
             })
         else:
@@ -59,33 +68,20 @@ def get_symbols():
 
 @app.route('/smart-money', methods=['GET'])
 def get_smart_money():
-    """تشخیص ورود پول هوشمند به سهم‌ها"""
+    """تشخیص ورود پول هوشمند به سهم‌های خاص"""
     try:
         api_key = os.getenv('BRSAPI_KEY')
-        
-        # گرفتن لیست نمادها
-        symbols_url = f"https://BrsApi.ir/Api/Tsetmc/AllSymbols.php?key={api_key}"
         
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 OPR/106.0.0.0",
             "Accept": "application/json, text/plain, */*"
         }
         
-        response = requests.get(symbols_url, headers=headers)
-        
-        if response.status_code != 200:
-            return jsonify({
-                "success": False,
-                "error": f"Failed to get symbols: {response.status_code}"
-            }), 500
-            
-        symbols = response.json()
         smart_money_stocks = []
+        failed_symbols = []
         
-        # محدود کردن به 10 نماد اول برای تست سریعتر
-        limit = request.args.get('limit', 500, type=int)
-        
-        for symbol in symbols[:limit]:
+        # بررسی فقط سیمبل‌های تعریف شده
+        for symbol in TARGET_SYMBOLS:
             try:
                 # دریافت اطلاعات معاملاتی هر نماد
                 stock_url = f"https://BrsApi.ir/Api/Tsetmc/StockInfo.php?key={api_key}&symbol={symbol}"
@@ -99,23 +95,46 @@ def get_smart_money():
                     
                     if smart_money_analysis['has_smart_money']:
                         smart_money_stocks.append(smart_money_analysis)
+                else:
+                    failed_symbols.append({
+                        "symbol": symbol,
+                        "error": f"API Error: {stock_response.status_code}"
+                    })
                         
             except Exception as e:
                 print(f"Error analyzing {symbol}: {str(e)}")
+                failed_symbols.append({
+                    "symbol": symbol,
+                    "error": str(e)
+                })
                 continue
+        
+        # تعیین پیام بر اساس نتایج
+        if len(smart_money_stocks) == 0:
+            message = "🚫 هیچ پول هوشمندی در سهم‌های هدف شناسایی نشد"
+            status = "no_smart_money_detected"
+        else:
+            message = f"✅ پول هوشمند در {len(smart_money_stocks)} سهم شناسایی شد"
+            status = "smart_money_detected"
         
         return jsonify({
             "success": True,
+            "status": status,
+            "message": message,
             "timestamp": datetime.now().isoformat(),
-            "analyzed_symbols": limit,
+            "target_symbols": TARGET_SYMBOLS,
+            "analyzed_symbols": len(TARGET_SYMBOLS),
             "smart_money_detected": len(smart_money_stocks),
-            "stocks_with_smart_money": smart_money_stocks
+            "failed_symbols": len(failed_symbols),
+            "stocks_with_smart_money": smart_money_stocks,
+            "failed_analyses": failed_symbols if failed_symbols else None
         })
         
     except Exception as e:
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "message": "❌ خطا در بررسی پول هوشمند"
         }), 500
 
 @app.route('/smart-money/<symbol>', methods=['GET'])
@@ -129,6 +148,9 @@ def get_symbol_smart_money(symbol):
             "Accept": "application/json, text/plain, */*"
         }
         
+        # چک کردن اینکه سیمبل در لیست هدف هست یا نه
+        is_target_symbol = symbol in TARGET_SYMBOLS
+        
         # دریافت اطلاعات نماد
         stock_url = f"https://BrsApi.ir/Api/Tsetmc/StockInfo.php?key={api_key}&symbol={symbol}"
         stock_response = requests.get(stock_url, headers=headers)
@@ -136,7 +158,8 @@ def get_symbol_smart_money(symbol):
         if stock_response.status_code != 200:
             return jsonify({
                 "success": False,
-                "error": f"Failed to get data for symbol {symbol}: {stock_response.status_code}"
+                "error": f"Failed to get data for symbol {symbol}: {stock_response.status_code}",
+                "message": f"❌ خطا در دریافت اطلاعات {symbol}"
             }), 500
             
         stock_data = stock_response.json()
@@ -144,9 +167,20 @@ def get_symbol_smart_money(symbol):
         # تحلیل پول هوشمند
         analysis = analyze_smart_money(stock_data, symbol)
         
+        # تعیین پیام بر اساس نتایج
+        if analysis['has_smart_money']:
+            message = f"✅ پول هوشمند در {symbol} شناسایی شد"
+            status = "smart_money_detected"
+        else:
+            message = f"🚫 پول هوشمند در {symbol} شناسایی نشد"
+            status = "no_smart_money_detected"
+        
         return jsonify({
             "success": True,
             "symbol": symbol,
+            "is_target_symbol": is_target_symbol,
+            "status": status,
+            "message": message,
             "timestamp": datetime.now().isoformat(),
             "analysis": analysis
         })
@@ -154,7 +188,9 @@ def get_symbol_smart_money(symbol):
     except Exception as e:
         return jsonify({
             "success": False,
-            "error": str(e)
+            "symbol": symbol,
+            "error": str(e),
+            "message": f"❌ خطا در تحلیل {symbol}"
         }), 500
 
 def analyze_smart_money(stock_data, symbol):
@@ -320,7 +356,11 @@ def analyze_smart_money(stock_data, symbol):
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({"status": "healthy"})
+    return jsonify({
+        "status": "healthy",
+        "target_symbols": TARGET_SYMBOLS,
+        "target_symbols_count": len(TARGET_SYMBOLS)
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
