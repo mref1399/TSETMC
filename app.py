@@ -83,7 +83,7 @@ def get_smart_money():
         smart_money_stocks = []
         
         # محدود کردن به 10 نماد اول برای تست سریعتر
-        limit = request.args.get('limit', 10, type=int)
+        limit = request.args.get('limit', 500, type=int)
         
         for symbol in symbols[:limit]:
             try:
