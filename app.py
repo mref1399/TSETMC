@@ -123,7 +123,6 @@ def cleanup_cache():
         
         # Memory management
         if len(REQUEST_CACHE) > config.MAX_CACHE_SIZE:
-            # حذف قدیمی‌ترین entries
             sorted_items = sorted(REQUEST_CACHE.items(), key=lambda x: x[1][1])
             keys_to_remove = [item[0] for item in sorted_items[:config.MAX_CACHE_SIZE//2]]
             for key in keys_to_remove:
@@ -151,27 +150,79 @@ def set_cached_data(key, data):
     with cache_lock:
         REQUEST_CACHE[key] = (data, time.time())
 
-def parse_stock_data(data, symbol):
-    """تجزیه داده‌های سهم"""
+def safe_float(value, default=0.0):
+    """تبدیل ایمن به float"""
     try:
-        parts = data.split(',')
-        if len(parts) < 10:
+        if value == '' or value is None:
+            return default
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+def safe_int(value, default=0):
+    """تبدیل ایمن به int"""
+    try:
+        if value == '' or value is None:
+            return default
+        return int(float(value))  # ابتدا به float تبدیل می‌کنیم سپس به int
+    except (ValueError, TypeError):
+        return default
+
+def parse_stock_data(data, symbol):
+    """تجزیه اصلاح شده داده‌های سهم"""
+    try:
+        # پاک‌سازی داده‌ها
+        data = data.strip()
+        if not data or len(data) < 10:
+            logger.warning(f"داده خالی یا کوتاه برای سهم {symbol}")
             return None
         
-        return {
+        # تقسیم بر اساس کاما و حذف فضاهای خالی
+        parts = [part.strip() for part in data.split(',')]
+        
+        if len(parts) < 11:
+            logger.warning(f"تعداد فیلدهای کافی برای سهم {symbol} وجود ندارد: {len(parts)} فیلد")
+            return None
+        
+        # استخراج داده‌ها با بررسی صحت
+        parsed_data = {
             'symbol': symbol,
-            'last_price': float(parts[2]) if parts[2] != '' else 0,
-            'close_price': float(parts[3]) if parts[3] != '' else 0,
-            'first_price': float(parts[4]) if parts[4] != '' else 0,
-            'yesterday_price': float(parts[5]) if parts[5] != '' else 0,
-            'volume': int(parts[6]) if parts[6] != '' else 0,
-            'value': float(parts[7]) if parts[7] != '' else 0,
-            'min_price': float(parts[8]) if parts[8] != '' else 0,
-            'max_price': float(parts[9]) if parts[9] != '' else 0,
-            'count': int(parts[10]) if len(parts) > 10 and parts[10] != '' else 0,
+            'last_price': safe_float(parts[2]),
+            'close_price': safe_float(parts[3]),  
+            'first_price': safe_float(parts[4]),
+            'yesterday_price': safe_float(parts[5]),
+            'volume': safe_int(parts[6]),
+            'value': safe_float(parts[7]),
+            'min_price': safe_float(parts[8]),
+            'max_price': safe_float(parts[9]),
+            'count': safe_int(parts[10]),
         }
-    except (ValueError, IndexError) as e:
-        logger.warning(f"خطا در تجزیه داده سهم {symbol}: {e}")
+        
+        # اعتبارسنجی داده‌ها
+        if parsed_data['last_price'] <= 0:
+            logger.warning(f"قیمت نامعتبر برای سهم {symbol}: {parsed_data['last_price']}")
+            return None
+            
+        # محاسبه اندازه متوسط معامله
+        if parsed_data['count'] > 0 and parsed_data['value'] > 0:
+            parsed_data['avg_trade_size'] = parsed_data['value'] / parsed_data['count']
+        else:
+            parsed_data['avg_trade_size'] = 0
+            
+        # محاسبه درصد تغییر قیمت
+        if parsed_data['yesterday_price'] > 0:
+            parsed_data['price_change_percent'] = (
+                (parsed_data['last_price'] - parsed_data['yesterday_price']) / 
+                parsed_data['yesterday_price']
+            ) * 100
+        else:
+            parsed_data['price_change_percent'] = 0
+        
+        logger.info(f"داده سهم {symbol} با موفقیت پردازش شد")
+        return parsed_data
+        
+    except Exception as e:
+        logger.error(f"خطا در تجزیه داده سهم {symbol}: {str(e)}")
         return None
 
 @track_performance
@@ -199,123 +250,188 @@ def get_stock_data(symbol, max_retries=3):
         except Exception as e:
             logger.warning(f"تلاش {attempt + 1} برای {symbol} ناموفق: {e}")
             if attempt < max_retries - 1:
-                time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                time.sleep(0.5 * (attempt + 1))
     
     logger.error(f"دریافت داده برای سهم {symbol} پس از {max_retries} تلاش ناموفق بود")
     return None
 
-def calculate_relative_volume(current_volume, avg_volume):
-    """محاسبه حجم نسبی"""
-    if avg_volume == 0:
-        return 0
-    return current_volume / avg_volume
-
-def calculate_price_change_percent(current_price, yesterday_price):
-    """محاسبه درصد تغییر قیمت"""
-    if yesterday_price == 0:
-        return 0
-    return ((current_price - yesterday_price) / yesterday_price) * 100
-
 @track_performance
-def analyze_smart_money_fast(stock_data):
-    """تحلیل سریع پول هوشمند"""
+def analyze_smart_money_enhanced(stock_data):
+    """تحلیل بهبود یافته پول هوشمند"""
     if not stock_data:
         return {
             'symbol': 'N/A',
             'smart_money_score': 0,
             'analysis': 'داده دریافت نشد',
-            'recommendation': 'نامشخص'
+            'recommendation': 'نامشخص',
+            'risk_level': 'بالا'
         }
     
     try:
-        # محاسبات اساسی
+        # استخراج داده‌های محاسبه شده
         volume = stock_data.get('volume', 0)
         value = stock_data.get('value', 0)
         last_price = stock_data.get('last_price', 0)
         yesterday_price = stock_data.get('yesterday_price', 0)
         count = stock_data.get('count', 0)
-        
-        # محاسبه متریک‌های کلیدی
-        price_change_percent = calculate_price_change_percent(last_price, yesterday_price)
-        avg_trade_size = value / count if count > 0 else 0
+        avg_trade_size = stock_data.get('avg_trade_size', 0)
+        price_change_percent = stock_data.get('price_change_percent', 0)
         
         # امتیازدهی پول هوشمند (0-100)
         smart_money_score = 0
         analysis_points = []
+        risk_factors = []
         
-        # بررسی حجم معامله (وزن: 30%)
-        if volume > 1000000:  # حجم بالا
-            smart_money_score += 30
-            analysis_points.append("حجم معامله بالا")
-        elif volume > 500000:  # حجم متوسط
-            smart_money_score += 20
-            analysis_points.append("حجم معامله متوسط")
-        else:
-            smart_money_score += 5
-            analysis_points.append("حجم معامله پایین")
-        
-        # بررسی ارزش معامله (وزن: 25%)
-        if value > 10000000000:  # ارزش بالا (10 میلیارد)
+        # 1. بررسی حجم معامله (وزن: 25%)
+        if volume > 50000000:  # حجم فوق‌العاده
             smart_money_score += 25
-            analysis_points.append("ارزش معامله بالا")
-        elif value > 5000000000:  # ارزش متوسط (5 میلیارد)
-            smart_money_score += 18
-            analysis_points.append("ارزش معامله متوسط")
-        else:
-            smart_money_score += 8
-            analysis_points.append("ارزش معامله پایین")
-        
-        # بررسی اندازه متوسط معامله (وزن: 20%)
-        if avg_trade_size > 50000000:  # معاملات بزرگ
+            analysis_points.append("🔥 حجم معامله فوق‌العاده")
+        elif volume > 10000000:  # حجم بالا
             smart_money_score += 20
-            analysis_points.append("معاملات بزرگ (نهادی)")
-        elif avg_trade_size > 20000000:  # معاملات متوسط
-            smart_money_score += 12
-            analysis_points.append("معاملات متوسط")
+            analysis_points.append("📈 حجم معامله بالا")
+        elif volume > 1000000:  # حجم متوسط رو به بالا
+            smart_money_score += 15
+            analysis_points.append("📊 حجم معامله متوسط")
+        elif volume > 100000:  # حجم پایین
+            smart_money_score += 8
+            analysis_points.append("📉 حجم معامله پایین")
+            risk_factors.append("حجم پایین")
+        else:
+            smart_money_score += 2
+            analysis_points.append("⚠️ حجم معامله بسیار پایین")
+            risk_factors.append("حجم بسیار پایین")
+        
+        # 2. بررسی ارزش معامله (وزن: 25%)
+        value_billions = value / 1000000000  # تبدیل به میلیارد
+        if value_billions > 100:  # بیش از 100 میلیارد
+            smart_money_score += 25
+            analysis_points.append(f"💰 ارزش معامله فوق‌العاده: {value_billions:.1f} میلیارد")
+        elif value_billions > 50:  # بیش از 50 میلیارد
+            smart_money_score += 20
+            analysis_points.append(f"💎 ارزش معامله بالا: {value_billions:.1f} میلیارد")
+        elif value_billions > 10:  # بیش از 10 میلیارد
+            smart_money_score += 15
+            analysis_points.append(f"💵 ارزش معامله خوب: {value_billions:.1f} میلیارد")
+        elif value_billions > 1:  # بیش از 1 میلیارد
+            smart_money_score += 10
+            analysis_points.append(f"💳 ارزش معامله متوسط: {value_billions:.1f} میلیارد")
         else:
             smart_money_score += 3
-            analysis_points.append("معاملات کوچک (خرد)")
+            analysis_points.append(f"💴 ارزش معامله پایین: {value_billions:.1f} میلیارد")
+            risk_factors.append("ارزش پایین")
         
-        # بررسی تغییر قیمت (وزن: 15%)
-        if abs(price_change_percent) > 5:  # تغییر قیمت قابل توجه
+        # 3. بررسی اندازه متوسط معامله (وزن: 20%)
+        avg_millions = avg_trade_size / 1000000  # تبدیل به میلیون
+        if avg_millions > 100:  # معاملات نهادی بزرگ
+            smart_money_score += 20
+            analysis_points.append(f"🏛️ معاملات نهادی بزرگ: {avg_millions:.1f}M")
+        elif avg_millions > 50:  # معاملات نهادی
             smart_money_score += 15
-            analysis_points.append(f"تغییر قیمت قابل توجه: {price_change_percent:.2f}%")
-        elif abs(price_change_percent) > 2:
-            smart_money_score += 8
-            analysis_points.append(f"تغییر قیمت متوسط: {price_change_percent:.2f}%")
-        
-        # بررسی تعداد معاملات (وزن: 10%)
-        if count > 1000:  # تعداد معاملات بالا
+            analysis_points.append(f"🏢 معاملات نهادی: {avg_millions:.1f}M")
+        elif avg_millions > 10:  # معاملات متوسط
             smart_money_score += 10
-            analysis_points.append("تعداد معاملات بالا")
-        elif count > 500:
-            smart_money_score += 6
-            analysis_points.append("تعداد معاملات متوسط")
-        
-        # تعیین توصیه
-        if smart_money_score >= 80:
-            recommendation = "خرید قوی - حضور پررنگ پول هوشمند"
-        elif smart_money_score >= 65:
-            recommendation = "خرید - نشانه‌های مثبت پول هوشمند"
-        elif smart_money_score >= 50:
-            recommendation = "نگهداری - وضعیت متعادل"
-        elif smart_money_score >= 35:
-            recommendation = "احتیاط - ضعف نسبی"
+            analysis_points.append(f"🏪 معاملات متوسط: {avg_millions:.1f}M")
+        elif avg_millions > 1:  # معاملات کوچک
+            smart_money_score += 5
+            analysis_points.append(f"🏠 معاملات کوچک: {avg_millions:.1f}M")
         else:
-            recommendation = "فروش - عدم حضور پول هوشمند"
+            smart_money_score += 1
+            analysis_points.append(f"🪙 معاملات خرد: {avg_millions:.1f}M")
+            risk_factors.append("معاملات خرد")
+        
+        # 4. بررسی تغییر قیمت (وزن: 15%)
+        if price_change_percent > 7:  # رشد قوی
+            smart_money_score += 15
+            analysis_points.append(f"🚀 رشد قوی: +{price_change_percent:.1f}%")
+        elif price_change_percent > 3:  # رشد خوب
+            smart_money_score += 12
+            analysis_points.append(f"📈 رشد مثبت: +{price_change_percent:.1f}%")
+        elif price_change_percent > 0:  # رشد ملایم
+            smart_money_score += 8
+            analysis_points.append(f"🔼 رشد ملایم: +{price_change_percent:.1f}%")
+        elif price_change_percent > -3:  # کاهش ملایم
+            smart_money_score += 5
+            analysis_points.append(f"🔽 کاهش ملایم: {price_change_percent:.1f}%")
+        elif price_change_percent > -7:  # کاهش قابل توجه
+            smart_money_score += 2
+            analysis_points.append(f"📉 کاهش قابل توجه: {price_change_percent:.1f}%")
+            risk_factors.append("کاهش قیمت")
+        else:  # سقوط
+            smart_money_score += 0
+            analysis_points.append(f"🔻 سقوط: {price_change_percent:.1f}%")
+            risk_factors.append("سقوط قیمت")
+        
+        # 5. بررسی تعداد معاملات (وزن: 10%)
+        if count > 10000:  # تعداد معاملات فوق‌العاده
+            smart_money_score += 10
+            analysis_points.append(f"🔥 تعداد معاملات بالا: {count:,}")
+        elif count > 5000:  # تعداد معاملات بالا
+            smart_money_score += 8
+            analysis_points.append(f"📊 تعداد معاملات خوب: {count:,}")
+        elif count > 1000:  # تعداد معاملات متوسط
+            smart_money_score += 6
+            analysis_points.append(f"📈 تعداد معاملات متوسط: {count:,}")
+        elif count > 100:  # تعداد معاملات کم
+            smart_money_score += 3
+            analysis_points.append(f"📉 تعداد معاملات کم: {count:,}")
+        else:
+            smart_money_score += 1
+            analysis_points.append(f"⚠️ تعداد معاملات بسیار کم: {count:,}")
+            risk_factors.append("تعداد معاملات کم")
+        
+        # 6. ضریب نقدینگی (وزن: 5%)
+        if volume > 0 and last_price > 0:
+            liquidity_ratio = (volume * last_price) / value if value > 0 else 0
+            if liquidity_ratio > 0.8:
+                smart_money_score += 5
+                analysis_points.append("💧 نقدینگی عالی")
+            elif liquidity_ratio > 0.5:
+                smart_money_score += 3
+                analysis_points.append("💧 نقدینگی خوب")
+            else:
+                smart_money_score += 1
+                analysis_points.append("💧 نقدینگی پایین")
+                risk_factors.append("نقدینگی کم")
+        
+        # تعیین سطح ریسک
+        if len(risk_factors) == 0:
+            risk_level = "پایین"
+        elif len(risk_factors) <= 2:
+            risk_level = "متوسط"
+        else:
+            risk_level = "بالا"
+        
+        # تعیین توصیه بر اساس امتیاز و ریسک
+        if smart_money_score >= 85 and risk_level == "پایین":
+            recommendation = "🎯 خرید قوی - فرصت عالی"
+        elif smart_money_score >= 75:
+            recommendation = "✅ خرید - نشانه‌های قوی پول هوشمند"
+        elif smart_money_score >= 60:
+            recommendation = "📈 خرید تدریجی - وضعیت مطلوب"
+        elif smart_money_score >= 45:
+            recommendation = "⚖️ نگهداری - وضعیت متعادل"
+        elif smart_money_score >= 30:
+            recommendation = "⚠️ احتیاط - ضعف نسبی"
+        elif smart_money_score >= 20:
+            recommendation = "📉 فروش تدریجی - عدم حضور پول هوشمند"
+        else:
+            recommendation = "🔻 فروش - وضعیت نامطلوب"
         
         return {
             'symbol': stock_data.get('symbol', 'N/A'),
-            'smart_money_score': round(smart_money_score, 2),
+            'smart_money_score': round(smart_money_score, 1),
             'analysis': ' | '.join(analysis_points),
             'recommendation': recommendation,
+            'risk_level': risk_level,
+            'risk_factors': risk_factors,
             'metrics': {
-                'volume': volume,
-                'value': value,
+                'volume': f"{volume:,}",
+                'value_billions': round(value_billions, 2),
                 'price_change_percent': round(price_change_percent, 2),
-                'avg_trade_size': round(avg_trade_size, 0),
-                'trade_count': count,
-                'last_price': last_price
+                'avg_trade_size_millions': round(avg_millions, 2),
+                'trade_count': f"{count:,}",
+                'last_price': f"{last_price:,}",
+                'yesterday_price': f"{yesterday_price:,}"
             }
         }
         
@@ -325,7 +441,8 @@ def analyze_smart_money_fast(stock_data):
             'symbol': stock_data.get('symbol', 'N/A'),
             'smart_money_score': 0,
             'analysis': f'خطا در تحلیل: {str(e)}',
-            'recommendation': 'نامشخص'
+            'recommendation': '❌ نامشخص - خطا در تحلیل',
+            'risk_level': 'بالا'
         }
 
 def calculate_cache_hit_rate():
@@ -340,6 +457,8 @@ def get_smart_money():
     """تحلیل پول هوشمند برای همه سهام‌ها"""
     start_time = time.time()
     results = []
+    successful_analysis = 0
+    failed_analysis = 0
     
     try:
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as executor:
@@ -354,27 +473,54 @@ def get_smart_money():
                 symbol = future_to_symbol[future]
                 try:
                     stock_data = future.result()
-                    analysis = analyze_smart_money_fast(stock_data)
-                    results.append(analysis)
+                    if stock_data:
+                        analysis = analyze_smart_money_enhanced(stock_data)
+                        results.append(analysis)
+                        successful_analysis += 1
+                    else:
+                        results.append({
+                            'symbol': symbol,
+                            'smart_money_score': 0,
+                            'analysis': 'داده دریافت نشد',
+                            'recommendation': '❌ نامشخص - عدم دسترسی به داده',
+                            'risk_level': 'بالا'
+                        })
+                        failed_analysis += 1
                 except Exception as e:
                     logger.error(f"خطا در پردازش سهم {symbol}: {e}")
                     results.append({
                         'symbol': symbol,
                         'smart_money_score': 0,
                         'analysis': f'خطا در پردازش: {str(e)}',
-                        'recommendation': 'نامشخص'
+                        'recommendation': '❌ نامشخص - خطا در پردازش',
+                        'risk_level': 'بالا'
                     })
+                    failed_analysis += 1
         
         # مرتب‌سازی بر اساس امتیاز پول هوشمند
         results.sort(key=lambda x: x.get('smart_money_score', 0), reverse=True)
+        
+        # دسته‌بندی نتایج
+        top_picks = [r for r in results if r.get('smart_money_score', 0) >= 70]
+        good_options = [r for r in results if 50 <= r.get('smart_money_score', 0) < 70]
+        watch_list = [r for r in results if 30 <= r.get('smart_money_score', 0) < 50]
+        avoid_list = [r for r in results if r.get('smart_money_score', 0) < 30]
         
         execution_time = time.time() - start_time
         
         return {
             'status': 'success',
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'total_stocks': len(TARGET_SYMBOLS),
-            'analyzed_stocks': len(results),
+            'summary': {
+                'total_stocks': len(TARGET_SYMBOLS),
+                'successful_analysis': successful_analysis,
+                'failed_analysis': failed_analysis,
+                'success_rate': round((successful_analysis / len(TARGET_SYMBOLS)) * 100, 1),
+                'top_picks_count': len(top_picks),
+                'good_options_count': len(good_options),
+                'watch_list_count': len(watch_list),
+                'avoid_list_count': len(avoid_list)
+            },
             'execution_time_seconds': round(execution_time, 2),
             'performance': {
                 'cache_hit_rate': round(calculate_cache_hit_rate(), 2),
@@ -382,9 +528,12 @@ def get_smart_money():
                 'max_workers': config.MAX_WORKERS,
                 'threading_active': threading.active_count()
             },
-            'top_recommendations': [
-                r for r in results[:10] if r.get('smart_money_score', 0) > 0
-            ],
+            'categorized_results': {
+                'top_picks': top_picks[:10],  # بهترین 10 انتخاب
+                'good_options': good_options[:10],  # 10 گزینه خوب
+                'watch_list': watch_list[:5],  # 5 سهم قابل نظر
+                'avoid_list': avoid_list[:5]  # 5 سهم اجتناب
+            },
             'all_analysis': results
         }
         
@@ -465,6 +614,6 @@ def cleanup_memory(response):
     return response
 
 if __name__ == '__main__':
-    logger.info(f"شروع سرویس تحلیل پول هوشمند با {len(TARGET_SYMBOLS)} سهم")
-    logger.info(f"تنظیمات: MAX_WORKERS={config.MAX_WORKERS}, CACHE_DURATION={config.CACHE_DURATION}s")
+    logger.info(f"🚀 شروع سرویس تحلیل پول هوشمند با {len(TARGET_SYMBOLS)} سهم")
+    logger.info(f"⚙️ تنظیمات: MAX_WORKERS={config.MAX_WORKERS}, CACHE_DURATION={config.CACHE_DURATION}s")
     app.run(debug=False, host='0.0.0.0', port=5000, threaded=True)
