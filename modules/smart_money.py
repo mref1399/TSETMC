@@ -1,144 +1,135 @@
 import requests
-import json
-import time
-import random
+import pandas as pd
+from datetime import datetime, timedelta
 import logging
-from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-class SmartMoneyAnalyzer:
+class SmartMoneyDetector:
+    """تشخیص واقعی پول هوشمند"""
+    
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+        self.min_smart_money = 2_000_000_000  # 2 میلیارد تومان
+        self.sam_api_base = "https://api.sam.ir/v1"
         
-        # بارگذاری لیست سهام از فایل
-        self.symbols = self.load_symbols()
-        
-        # قیمت‌های پایه سهام
-        self.base_prices = {
-            'خارزم': 8500, 'فرآور': 12300, 'سدور': 5600, 'سخاش': 15400,
-            'گشان': 7800, 'وساپا': 9200, 'ورنا': 6700, 'ختوقا': 11900,
-            'فباهنر': 4500, 'شرانل': 13600, 'شاوان': 8900, 'رکیش': 7200,
-            'فولاد': 25400, 'حریل': 14800, 'کبافق': 16700, 'ساوه': 5900, 'وبملت': 18500
-        }
-
-    def load_symbols(self):
-        """بارگذاری لیست سهام از فایل"""
+    def get_smart_money(self, symbol: str) -> dict:
+        """محاسبه واقعی پول هوشمند برای یک سهم"""
         try:
-            with open('symbols.txt', 'r', encoding='utf-8') as f:
-                symbols = [line.strip() for line in f if line.strip()]
-            logger.info(f"✅ {len(symbols)} سهم از فایل بارگذاری شد")
-            return symbols
-        except FileNotFoundError:
-            logger.error("❌ فایل symbols.txt یافت نشد!")
-            return ['خارزم', 'فولاد', 'وبملت']  # پیش‌فرض
+            # دریافت داده‌های حقیقی-حقوقی
+            url = f"{self.sam_api_base}/symbol/{symbol}/legal-natural"
+            
+            response = requests.get(url, timeout=10)
+            if response.status_code != 200:
+                return {'symbol': symbol, 'smart_money': 0, 'has_inflow': False}
+            
+            data = response.json()
+            
+            # محاسبه خالص خرید حقیقی (پول هوشمند)
+            legal_buy = data.get('legal_buy', 0) or 0
+            legal_sell = data.get('legal_sell', 0) or 0
+            net_legal = legal_buy - legal_sell
+            
+            # تبدیل به تومان (اگر ریال باشه)
+            smart_money_toman = net_legal / 10 if net_legal > 1000000 else net_legal
+            
+            return {
+                'symbol': symbol,
+                'smart_money': smart_money_toman,
+                'has_inflow': smart_money_toman >= self.min_smart_money,
+                'legal_buy': legal_buy,
+                'legal_sell': legal_sell
+            }
+            
         except Exception as e:
-            logger.error(f"خطا در بارگذاری symbols.txt: {e}")
-            return ['خارزم', 'فولاد', 'وبملت']
-
-    def get_stock_data(self, symbol):
-        """دریافت داده سهم"""
-        try:
-            # تلاش برای API واقعی
-            real_data = self._try_real_api(symbol)
-            if real_data:
-                return real_data
-        except:
-            pass
-
-        # شبیه‌سازی داده
-        base_price = self.base_prices.get(symbol, random.randint(5000, 20000))
-        price_change = random.uniform(-0.05, 0.05)
-        volume_change = random.uniform(0.3, 3.0)
-
-        current_price = int(base_price * (1 + price_change))
-        current_volume = random.randint(1000000, 50000000) * volume_change
-
+            logger.error(f"Error fetching smart money for {symbol}: {str(e)}")
+            return {'symbol': symbol, 'smart_money': 0, 'has_inflow': False}
+    
+    def scan_all_symbols(self, symbols_list: list) -> dict:
+        """اسکن همه سهم‌ها برای پول هوشمند"""
+        results = []
+        total_smart_money = 0
+        
+        for symbol in symbols_list:
+            logger.info(f"Scanning {symbol} for smart money...")
+            result = self.get_smart_money(symbol)
+            
+            if result['has_inflow']:
+                results.append(result)
+                total_smart_money += result['smart_money']
+        
         return {
-            'symbol': symbol,
-            'current_price': current_price,
-            'volume': int(current_volume),
-            'value': current_price * current_volume,
-            'timestamp': time.time()
+            'symbols_with_inflow': results,
+            'total_count': len(results),
+            'total_smart_money': total_smart_money,
+            'has_any_inflow': len(results) > 0
         }
 
-    def _try_real_api(self, symbol):
-        """تلاش برای دریافت داده واقعی"""
-        try:
-            url = "http://old.tsetmc.com/tsev2/data/instinfodata.aspx"
-            params = {'i': symbol, 'c': '1'}
-            response = self.session.get(url, params=params, timeout=5)
-
-            if response.status_code == 200 and response.text.strip():
-                parts = response.text.strip().split(',')
-                if len(parts) >= 8:
-                    volume = int(float(parts[6].replace(',', ''))) if parts[6] else 0
-                    price = float(parts[2].replace(',', '')) if parts[2] else 0
-
-                    if volume > 0 and price > 0:
-                        return {
-                            'symbol': symbol,
-                            'current_price': price,
-                            'volume': volume,
-                            'value': price * volume,
-                            'timestamp': time.time()
-                        }
-        except:
-            pass
-        return None
-
-    def calculate_smart_money(self, stock_data):
-        """محاسبه پول هوشمند"""
-        if not stock_data:
-            return 0, "تومان"
-
-        volume = stock_data.get('volume', 0)
-        price = stock_data.get('current_price', 0)
-        smart_money = volume * price
-
-        if smart_money >= 1e12:
-            return round(smart_money / 1e12, 2), "هزار میلیارد"
-        elif smart_money >= 1e9:
-            return round(smart_money / 1e9, 2), "میلیارد"
-        elif smart_money >= 1e6:
-            return round(smart_money / 1e6, 2), "میلیون"
-        else:
-            return round(smart_money / 1e3, 2), "هزار"
-
-    def analyze(self):
-        """تحلیل اصلی پول هوشمند"""
-        results = []
+# تغییر در app.py - endpoint فعلی رو آپدیت کن:
+@app.route('/api/smart-money')
+def smart_money_api():
+    """API واقعی پول هوشمند"""
+    detector = SmartMoneyDetector()
+    
+    # خواندن لیست سهام
+    try:
+        with open('symbols.txt', 'r', encoding='utf-8') as f:
+            symbols = [line.strip() for line in f.readlines() if line.strip()]
+    except:
+        symbols = ['وبملت', 'خساپا', 'فولاد', 'شپنا', 'پرداخت']
+    
+    # اسکن پول هوشمند
+    results = detector.scan_all_symbols(symbols)
+    
+    if results['has_any_inflow']:
+        response = {
+            'status': 'success',
+            'message': f"پول هوشمند در {results['total_count']} سهم شناسایی شد",
+            'total_smart_money_toman': f"{results['total_smart_money']:,.0f}",
+            'symbols': []
+        }
         
-        logger.info(f"🔍 تحلیل {len(self.symbols)} سهم...")
+        for item in results['symbols_with_inflow']:
+            response['symbols'].append({
+                'symbol': item['symbol'],
+                'smart_money_toman': f"{item['smart_money']:,.0f}",
+                'smart_money_billion': f"{item['smart_money']/1_000_000_000:.2f}",
+                'legal_buy': f"{item['legal_buy']:,.0f}",
+                'legal_sell': f"{item['legal_sell']:,.0f}"
+            })
+    else:
+        response = {
+            'status': 'no_inflow',
+            'message': 'هیچ پول هوشمندی شناسایی نشد',
+            'total_smart_money_toman': '0',
+            'symbols': []
+        }
+    
+    return jsonify(response)
 
-        for symbol in self.symbols:
-            try:
-                stock_data = self.get_stock_data(symbol)
-                if stock_data:
-                    amount, unit = self.calculate_smart_money(stock_data)
-
-                    # فقط جریان‌های قابل توجه
-                    if amount >= 5:  # حداقل 5 میلیون
-                        results.append({
-                            'symbol': symbol,
-                            'smart_money_amount': amount,
-                            'unit': unit + ' تومان',
-                            'current_price': stock_data['current_price'],
-                            'volume': stock_data['volume'],
-                            'raw_value': stock_data['value']
-                        })
-
-            except Exception as e:
-                logger.error(f"خطا در تحلیل {symbol}: {e}")
-
-        # مرتب‌سازی بر اساس مقدار
-        results.sort(key=lambda x: x['raw_value'], reverse=True)
-        return results
-
-def smart_money():
-    """تابع اصلی برای فراخوانی"""
-    analyzer = SmartMoneyAnalyzer()
-    return analyzer.analyze()
+@app.route('/telegram')
+def telegram_format():
+    """پیام تلگرام برای پول هوشمند"""
+    detector = SmartMoneyDetector()
+    
+    try:
+        with open('symbols.txt', 'r', encoding='utf-8') as f:
+            symbols = [line.strip() for line in f.readlines() if line.strip()]
+    except:
+        symbols = ['وبملت', 'خساپا', 'فولاد', 'شپنا', 'پرداخت']
+    
+    results = detector.scan_all_symbols(symbols)
+    
+    if results['has_any_inflow']:
+        message = f"🧠 پول هوشمند شناسایی شد!\n\n"
+        message += f"📊 تعداد: {results['total_count']} سهم\n"
+        message += f"💰 مجموع: {results['total_smart_money']:,.0f} تومان\n\n"
+        
+        for item in results['symbols_with_inflow']:
+            message += f"🔥 {item['symbol']}\n"
+            message += f"💵 {item['smart_money']:,.0f} تومان\n"
+            message += f"📈 {item['smart_money']/1_000_000_000:.2f} میلیارد\n\n"
+    else:
+        message = "😴 هیچ پول هوشمندی شناسایی نشد\n"
+        message += "📉 بازار در انتظار..."
+    
+    return message, 200, {'Content-Type': 'text/plain; charset=utf-8'}
