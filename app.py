@@ -1,46 +1,31 @@
 import requests
 import json
-import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Any
 import logging
 import pytz
 import jdatetime
-from flask import Flask, jsonify, request
-import gc
+from flask import Flask, jsonify, render_template_string
+import threading
 
-# تنظیمات لاگ
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-@dataclass
-class Config:
-    max_workers: int = 50  # تعداد thread همزمان
-    cache_duration: int = 60  # مدت کش (ثانیه)
-    request_timeout: int = 10
-    max_retries: int = 3
-    batch_size: int = 100
+# تنظیمات
+MAX_WORKERS = 100  # افزایش برای پردازش همه سهم‌ها
+REQUEST_TIMEOUT = 8
+CACHE_DURATION = 30
 
-config = Config()
-
-# متغیرهای سراسری
-REQUEST_CACHE = {}
-CACHE_HITS = 0
-CACHE_MISSES = 0
+# کش ساده
+CACHE = {}
 cache_lock = threading.Lock()
-performance_metrics = {}
 
-# لیست تمام نمادهای بورس (دریافت خودکار)
-ALL_SYMBOLS = []
-
-class TehranStockAPI:
+class StockAPI:
     BASE_URL = "http://old.tsetmc.com/tsev2/data/instinfodata.aspx"
-    SYMBOL_LIST_URL = "http://service.tsetmc.com/tsev2/data/MarketWatchPlus.aspx"
+    SYMBOLS_URL = "http://service.tsetmc.com/tsev2/data/MarketWatchPlus.aspx"
     
     def __init__(self):
         self.session = requests.Session()
@@ -48,399 +33,348 @@ class TehranStockAPI:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
 
-    def get_all_symbols(self) -> List[str]:
-        """دریافت لیست تمام نمادهای بورس"""
+    def get_all_symbols(self):
+        """دریافت تمام نمادهای بورس"""
         try:
-            response = self.session.get(self.SYMBOL_LIST_URL, timeout=config.request_timeout)
+            logger.info("در حال دریافت لیست کامل سهام از بورس...")
+            response = self.session.get(self.SYMBOLS_URL, timeout=15)
             if response.status_code == 200:
-                # پارس کردن پاسخ برای استخراج نمادها
                 data = response.text
-                symbols = self._parse_symbols_from_response(data)
-                logger.info(f"دریافت {len(symbols)} نماد از بورس")
-                return symbols
+                symbols = []
+                for line in data.strip().split('\n'):
+                    parts = line.split(',')
+                    if len(parts) > 2:
+                        symbol = parts[2].strip()
+                        if symbol and len(symbol) <= 12 and symbol.replace(' ', ''):
+                            symbols.append(symbol)
+                
+                unique_symbols = list(set(symbols))
+                logger.info(f"✅ {len(unique_symbols)} نماد از بورس دریافت شد")
+                return unique_symbols
         except Exception as e:
-            logger.error(f"خطا در دریافت لیست نمادها: {e}")
-            return self._get_backup_symbols()
-
-    def _parse_symbols_from_response(self, data: str) -> List[str]:
-        """استخراج نمادها از پاسخ API"""
-        symbols = []
-        try:
-            # پارس کردن داده‌های CSV-like
-            lines = data.strip().split('\n')
-            for line in lines:
-                parts = line.split(',')
-                if len(parts) > 2:
-                    symbol = parts[2].strip()  # نماد معمولاً در ستون سوم است
-                    if symbol and len(symbol) <= 10:  # فیلتر نمادهای معتبر
-                        symbols.append(symbol)
-        except Exception as e:
-            logger.error(f"خطا در پارس نمادها: {e}")
+            logger.error(f"خطا در دریافت نمادها: {e}")
         
-        return list(set(symbols))  # حذف تکراری‌ها
+        logger.warning("از لیست پشتیبان استفاده می‌شود...")
+        return []
 
-    def _get_backup_symbols(self) -> List[str]:
-        """لیست پشتیبان نمادهای مهم بورس"""
-        return [
-            'فولاد', 'پترو', 'وبملت', 'شپنا', 'فجر', 'خودرو', 'ساپا', 'شبندر',
-            'وپارس', 'حکمت', 'تاپیکو', 'شستا', 'تامین', 'پاسا', 'دی', 'نوری',
-            'ثسعادت', 'ثبهساز', 'کرمان', 'جم', 'وتجارت', 'فراسا', 'مپنا', 'خساپا',
-            'کگهر', 'خزر', 'حتوکا', 'رمپنا', 'سینا', 'کرتون', 'شاخص', 'فرابورس'
-        ]
-
-# تابع‌های کمکی
-def safe_float(value: Any, default: float = 0.0) -> float:
-    """تبدیل ایمن به float"""
-    try:
-        if value is None or value == '':
-            return default
-        return float(str(value).replace(',', ''))
-    except (ValueError, TypeError):
-        return default
-
-def safe_int(value: Any, default: int = 0) -> int:
-    """تبدیل ایمن به int"""
-    try:
-        if value is None or value == '':
-            return default
-        return int(float(str(value).replace(',', '')))
-    except (ValueError, TypeError):
-        return default
-
-def track_performance(func):
-    """Decorator برای ردیابی عملکرد"""
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        result = func(*args, **kwargs)
-        duration = time.time() - start_time
-        
-        func_name = func.__name__
-        if func_name not in performance_metrics:
-            performance_metrics[func_name] = []
-        performance_metrics[func_name].append(duration)
-        
-        return result
-    return wrapper
-
-# سیستم کش
-def get_cache_key(symbol: str) -> str:
-    """ایجاد کلید کش"""
-    return f"stock_{symbol}_{int(time.time() // config.cache_duration)}"
-
-def is_cache_valid(timestamp: float) -> bool:
-    """بررسی اعتبار کش"""
-    return time.time() - timestamp < config.cache_duration
-
-def cleanup_cache():
-    """پاکسازی کش قدیمی"""
+def get_stock_data(symbol, api_client):
+    """دریافت داده سهم"""
+    cache_key = f"{symbol}_{int(time.time() // CACHE_DURATION)}"
+    
+    # چک کش
     with cache_lock:
-        current_time = time.time()
-        expired_keys = [
-            key for key, (data, timestamp) in REQUEST_CACHE.items()
-            if not is_cache_valid(timestamp)
-        ]
-        for key in expired_keys:
-            del REQUEST_CACHE[key]
+        if cache_key in CACHE:
+            return CACHE[cache_key]
+    
+    try:
+        params = {'i': symbol, 'c': '1'}
+        response = api_client.session.get(
+            api_client.BASE_URL, 
+            params=params, 
+            timeout=REQUEST_TIMEOUT
+        )
         
-        if len(REQUEST_CACHE) > 1000:  # محدودیت حافظه
-            gc.collect()
-
-# دریافت داده‌های سهم
-@track_performance
-def fetch_stock_data(symbol: str, api_client: TehranStockAPI) -> Optional[Dict]:
-    """دریافت داده‌های سهم از API"""
-    for attempt in range(config.max_retries):
-        try:
-            params = {'i': symbol, 'c': '1'}
-            response = api_client.session.get(
-                api_client.BASE_URL,
-                params=params,
-                timeout=config.request_timeout
-            )
-            
-            if response.status_code == 200:
-                data = response.text.strip()
-                if data and len(data) > 10:
-                    return parse_stock_data(data, symbol)
-            
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"تلاش {attempt + 1}: خطا در دریافت {symbol}: {e}")
-            if attempt < config.max_retries - 1:
-                time.sleep(0.5 * (attempt + 1))
+        if response.status_code == 200:
+            data = response.text.strip()
+            if data and len(data) > 10:
+                parts = data.split(',')
+                if len(parts) >= 8:
+                    volume = int(float(parts[6].replace(',', ''))) if parts[6] and parts[6] != '0' else 0
+                    last_price = float(parts[2].replace(',', '')) if parts[2] and parts[2] != '0' else 0
+                    
+                    if volume > 0 and last_price > 0:
+                        result = {
+                            'symbol': symbol,
+                            'volume': volume,
+                            'last_price': last_price,
+                            'value': float(parts[7].replace(',', '')) if parts[7] else 0
+                        }
+                        
+                        # ذخیره در کش
+                        with cache_lock:
+                            CACHE[cache_key] = result
+                        
+                        return result
+    except Exception as e:
+        logger.debug(f"خطا در دریافت داده {symbol}: {e}")
     
     return None
 
-def fetch_stock_data_cached(symbol: str, api_client: TehranStockAPI) -> Optional[Dict]:
-    """دریافت داده‌های سهم با کش"""
-    global CACHE_HITS, CACHE_MISSES
+def calculate_smart_money(stock_data):
+    """محاسبه پول هوشمند وارد شده"""
+    if not stock_data:
+        return 0, "تومان"
     
-    cache_key = get_cache_key(symbol)
-    
-    with cache_lock:
-        if cache_key in REQUEST_CACHE:
-            data, timestamp = REQUEST_CACHE[cache_key]
-            if is_cache_valid(timestamp):
-                CACHE_HITS += 1
-                return data
-
-    # داده در کش نیست
-    CACHE_MISSES += 1
-    stock_data = fetch_stock_data(symbol, api_client)
-    
-    if stock_data:
-        with cache_lock:
-            REQUEST_CACHE[cache_key] = (stock_data, time.time())
-    
-    return stock_data
-
-def parse_stock_data(raw_data: str, symbol: str) -> Dict:
-    """پارس کردن داده‌های خام سهم"""
-    try:
-        parts = raw_data.split(',')
-        if len(parts) < 10:
-            return {}
-        
-        return {
-            'symbol': symbol,
-            'last_price': safe_float(parts[2]),
-            'close_price': safe_float(parts[3]),
-            'first_price': safe_float(parts[4]),
-            'yesterday_price': safe_float(parts[5]),
-            'volume': safe_int(parts[6]),
-            'value': safe_float(parts[7]),
-            'min_price': safe_float(parts[8]),
-            'max_price': safe_float(parts[9]),
-            'trade_count': safe_int(parts[10]) if len(parts) > 10 else 0,
-        }
-    except Exception as e:
-        logger.error(f"خطا در پارس داده‌های {symbol}: {e}")
-        return {}
-
-# تحلیل پول هوشمند
-@track_performance
-def analyze_smart_money_complete(stock_data: Dict, symbol: str) -> Dict:
-    """تحلیل کامل پول هوشمند"""
-    
-    # تنظیم زمان
-    tehran_tz = pytz.timezone('Asia/Tehran')
-    current_time = datetime.now(tehran_tz)
-    jalali_date = jdatetime.datetime.now().strftime('%Y/%m/%d')
-    gregorian_date = current_time.strftime('%Y/%m/%d')
-    time_str = current_time.strftime('%H:%M:%S')
-    
-    # استخراج داده‌ها
     volume = stock_data.get('volume', 0)
     last_price = stock_data.get('last_price', 0)
-    value = stock_data.get('value', 0)
-    yesterday_price = stock_data.get('yesterday_price', 0)
-    trade_count = stock_data.get('trade_count', 0)
-    max_price = stock_data.get('max_price', 0)
-    min_price = stock_data.get('min_price', 0)
     
-    if not all([volume, last_price, value]):
-        return {
-            'symbol': symbol,
-            'error': 'داده‌های ناکافی',
-            'smart_money_amount': 0,
-            'currency_unit': 'تومان',
-            'jalali_date': jalali_date,
-            'time': time_str
-        }
+    if not volume or not last_price:
+        return 0, "تومان"
     
-    # محاسبات اصلی
-    price_change = last_price - yesterday_price if yesterday_price else 0
-    price_change_percent = (price_change / yesterday_price * 100) if yesterday_price else 0
-    avg_trade_size = value / trade_count if trade_count else 0
+    # پول هوشمند = حجم × قیمت
+    smart_money = volume * last_price
     
-    # محاسبه پول هوشمند (ارزش کل معاملات)
-    smart_money_raw = volume * last_price
-    
-    # تعیین واحد مناسب
-    if smart_money_raw >= 1e12:  # بیش از 1000 میلیارد
-        smart_money_amount = round(smart_money_raw / 1e12, 2)
-        currency_unit = "هزار میلیارد تومان"
-    elif smart_money_raw >= 1e9:  # بیش از 1 میلیارد
-        smart_money_amount = round(smart_money_raw / 1e9, 2)
-        currency_unit = "میلیارد تومان"
-    elif smart_money_raw >= 1e6:  # بیش از 1 میلیون
-        smart_money_amount = round(smart_money_raw / 1e6, 2)
-        currency_unit = "میلیون تومان"
+    # تعیین واحد
+    if smart_money >= 1e12:
+        return round(smart_money / 1e12, 2), "هزار میلیارد تومان"
+    elif smart_money >= 1e9:
+        return round(smart_money / 1e9, 2), "میلیارد تومان"
+    elif smart_money >= 1e6:
+        return round(smart_money / 1e6, 2), "میلیون تومان"
+    elif smart_money >= 1e3:
+        return round(smart_money / 1e3, 2), "هزار تومان"
     else:
-        smart_money_amount = round(smart_money_raw, 0)
-        currency_unit = "تومان"
-    
-    # امتیازدهی (0-100)
-    volume_score = min(volume / 1e6 * 10, 100)  # بر اساس میلیون سهم
-    value_score = min(value / 1e11 * 10, 100)   # بر اساس 100 میلیارد تومان
-    activity_score = min(trade_count / 100 * 10, 100)  # بر اساس تعداد معاملات
-    price_momentum = abs(price_change_percent) * 2  # قدرت حرکت قیمت
-    
-    smart_money_score = (volume_score * 0.3 + value_score * 0.4 + 
-                        activity_score * 0.2 + price_momentum * 0.1)
-    smart_money_score = min(smart_money_score, 100)
-    
-    # توصیه سرمایه‌گذاری
-    if smart_money_score >= 80:
-        recommendation = "خرید قوی"
-        category = "Top Picks"
-    elif smart_money_score >= 60:
-        recommendation = "خرید"
-        category = "Good Options"
-    elif smart_money_score >= 40:
-        recommendation = "نگهداری"
-        category = "Watch List"
-    elif smart_money_score >= 20:
-        recommendation = "احتیاط"
-        category = "Risky"
-    else:
-        recommendation = "فروش"
-        category = "Avoid List"
-    
-    # سطح ریسک
-    volatility = ((max_price - min_price) / last_price * 100) if last_price else 0
-    if volatility > 5:
-        risk_level = "بالا"
-    elif volatility > 2:
-        risk_level = "متوسط"
-    else:
-        risk_level = "پایین"
-    
-    return {
-        'symbol': symbol,
-        'smart_money_amount': smart_money_amount,
-        'currency_unit': currency_unit,
-        'smart_money_score': round(smart_money_score, 2),
-        'recommendation': recommendation,
-        'category': category,
-        'risk_level': risk_level,
-        'jalali_date': jalali_date,
-        'gregorian_date': gregorian_date,
-        'time': time_str,
-        'full_datetime': f"{jalali_date} - {time_str}",
-        'market_data': {
-            'last_price': last_price,
-            'price_change': round(price_change, 0),
-            'price_change_percent': round(price_change_percent, 2),
-            'volume': volume,
-            'trade_count': trade_count,
-            'avg_trade_size': round(avg_trade_size, 0),
-            'min_price': min_price,
-            'max_price': max_price
-        },
-        'analysis_scores': {
-            'volume_score': round(volume_score, 2),
-            'value_score': round(value_score, 2),
-            'activity_score': round(activity_score, 2),
-            'price_momentum': round(price_momentum, 2)
-        }
-    }
+        return round(smart_money, 0), "تومان"
 
-# API Endpoints
-@app.route('/analyze-all-stocks', methods=['GET'])
-@track_performance
-def analyze_all_stocks():
-    """تحلیل تمام سهام بورس"""
+def get_current_time():
+    """دریافت زمان فعلی"""
+    tehran_tz = pytz.timezone('Asia/Tehran')
+    now = datetime.now(tehran_tz)
+    jalali_date = jdatetime.datetime.now().strftime('%Y/%m/%d')
+    time_str = now.strftime('%H:%M:%S')
+    return jalali_date, time_str
+
+# قالب HTML برای نمایش جدول
+TABLE_TEMPLATE = '''
+<!DOCTYPE html>
+<html dir="rtl" lang="fa">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>جریان پول هوشمند بورس تهران</title>
+    <style>
+        * { font-family: 'Tahoma', Arial, sans-serif; }
+        body { 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0; padding: 20px; color: #333;
+        }
+        .header { 
+            background: white; border-radius: 15px; padding: 20px; 
+            margin-bottom: 20px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        .header h1 { color: #2c3e50; margin: 0; }
+        .info { 
+            display: flex; justify-content: space-around; 
+            margin-top: 15px; font-size: 14px; color: #7f8c8d;
+        }
+        .table-container { 
+            background: white; border-radius: 15px; 
+            padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            overflow-x: auto;
+        }
+        table { 
+            width: 100%; border-collapse: collapse; 
+            font-size: 14px; margin-top: 10px;
+        }
+        th { 
+            background: linear-gradient(135deg, #3498db, #2980b9);
+            color: white; padding: 12px 8px; 
+            text-align: center; font-weight: bold;
+            border: 1px solid #2980b9;
+        }
+        td { 
+            padding: 10px 8px; text-align: center; 
+            border: 1px solid #ecf0f1;
+            transition: background-color 0.3s;
+        }
+        tr:nth-child(even) { background-color: #f8f9fa; }
+        tr:hover { background-color: #e8f4f8; }
+        .amount { font-weight: bold; color: #27ae60; }
+        .symbol { font-weight: bold; color: #2c3e50; }
+        .no-data { 
+            text-align: center; padding: 40px; 
+            color: #7f8c8d; font-size: 16px;
+        }
+        .summary { 
+            background: #ecf0f1; padding: 15px; 
+            border-radius: 10px; margin-bottom: 15px;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px; text-align: center;
+        }
+        .summary div { 
+            background: white; padding: 10px; 
+            border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .summary strong { color: #2c3e50; display: block; font-size: 18px; }
+        .summary span { color: #7f8c8d; font-size: 12px; }
+        .refresh-btn {
+            background: linear-gradient(135deg, #27ae60, #2ecc71);
+            color: white; border: none; padding: 10px 20px;
+            border-radius: 25px; cursor: pointer; font-size: 14px;
+            margin: 10px; transition: transform 0.3s;
+        }
+        .refresh-btn:hover { transform: scale(1.05); }
+        @media (max-width: 768px) {
+            .info { flex-direction: column; gap: 5px; }
+            table { font-size: 12px; }
+            th, td { padding: 8px 4px; }
+        }
+    </style>
+    <script>
+        function autoRefresh() {
+            setTimeout(() => location.reload(), 300000); // هر 5 دقیقه
+        }
+        function manualRefresh() {
+            location.reload();
+        }
+        window.onload = autoRefresh;
+    </script>
+</head>
+<body>
+    <div class="header">
+        <h1>🏛️ جریان پول هوشمند بورس تهران</h1>
+        <div class="info">
+            <span>📅 تاریخ: {{ scan_date }}</span>
+            <span>🕐 زمان اسکن: {{ scan_time }}</span>
+            <span>📊 تعداد نمادها: {{ total_symbols }}</span>
+            <span>💰 جریان‌های فعال: {{ active_flows }}</span>
+            <span>⏱️ زمان پردازش: {{ processing_time }}s</span>
+        </div>
+        <button class="refresh-btn" onclick="manualRefresh()">🔄 بروزرسانی</button>
+    </div>
+
+    <div class="table-container">
+        {% if flows %}
+        <div class="summary">
+            <div><strong>{{ total_symbols }}</strong><span>کل نمادها</span></div>
+            <div><strong>{{ active_flows }}</strong><span>جریان فعال</span></div>
+            <div><strong>{{ significant_flows }}</strong><span>جریان قابل توجه</span></div>
+            <div><strong>{{ top_flow_amount }}</strong><span>بالاترین جریان</span></div>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>ردیف</th>
+                    <th>نماد سهم</th>
+                    <th>مقدار پول هوشمند وارد شده</th>
+                    <th>واحد</th>
+                    <th>زمان</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for flow in flows %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td class="symbol">{{ flow.symbol }}</td>
+                    <td class="amount">{{ "{:,.0f}".format(flow.smart_money_amount) if flow.smart_money_amount > 1000 else "{:.2f}".format(flow.smart_money_amount) }}</td>
+                    <td>{{ flow.currency_unit }}</td>
+                    <td>{{ flow.time }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="no-data">
+            <h3>📭 هیچ جریان پول هوشمند قابل توجهی یافت نشد</h3>
+            <p>لطفاً چند دقیقه بعد دوباره تلاش کنید</p>
+        </div>
+        {% endif %}
+    </div>
+</body>
+</html>
+'''
+
+@app.route('/', methods=['GET'])
+@app.route('/table', methods=['GET'])
+def smart_money_table():
+    """نمایش جدول جریان پول هوشمند"""
     try:
         start_time = time.time()
-        api_client = TehranStockAPI()
+        api_client = StockAPI()
         
-        # دریافت لیست تمام نمادها
-        if not ALL_SYMBOLS:
-            ALL_SYMBOLS.extend(api_client.get_all_symbols())
+        # دریافت همه نمادها
+        symbols = api_client.get_all_symbols()
+        if not symbols:
+            logger.error("هیچ نمادی دریافت نشد!")
+            return "❌ خطا در دریافت لیست سهام", 500
         
-        if not ALL_SYMBOLS:
-            return jsonify({
-                'status': 'error', 
-                'message': 'نتوانست لیست نمادها را دریافت کند'
-            }), 500
+        logger.info(f"🔍 در حال بررسی {len(symbols)} نماد...")
         
-        logger.info(f"شروع تحلیل {len(ALL_SYMBOLS)} نماد...")
+        smart_money_flows = []
+        processed = 0
         
-        results = []
-        failed_symbols = []
-        
-        # پردازش به صورت batch برای مدیریت بهتر حافظه
-        for i in range(0, len(ALL_SYMBOLS), config.batch_size):
-            batch_symbols = ALL_SYMBOLS[i:i + config.batch_size]
+        # پردازش موازی همه سهام
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_symbol = {
+                executor.submit(get_stock_data, symbol, api_client): symbol 
+                for symbol in symbols
+            }
             
-            with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
-                future_to_symbol = {
-                    executor.submit(fetch_stock_data_cached, symbol, api_client): symbol 
-                    for symbol in batch_symbols
-                }
+            for future in as_completed(future_to_symbol):
+                symbol = future_to_symbol[future]
+                processed += 1
                 
-                for future in as_completed(future_to_symbol):
-                    symbol = future_to_symbol[future]
-                    try:
-                        stock_data = future.result()
-                        if stock_data and len(stock_data) > 3:
-                            analysis = analyze_smart_money_complete(stock_data, symbol)
-                            results.append(analysis)
-                        else:
-                            failed_symbols.append(symbol)
+                if processed % 50 == 0:
+                    logger.info(f"⏳ پردازش شده: {processed}/{len(symbols)}")
+                
+                try:
+                    stock_data = future.result()
+                    if stock_data:
+                        amount, unit = calculate_smart_money(stock_data)
+                        
+                        # فقط سهام با پول هوشمند قابل توجه (حداقل 10 میلیون تومان)
+                        if (unit == "میلیون تومان" and amount >= 10) or \
+                           (unit == "میلیارد تومان") or \
+                           (unit == "هزار میلیارد تومان"):
                             
-                    except Exception as e:
-                        logger.error(f"خطا در تحلیل {symbol}: {e}")
-                        failed_symbols.append(symbol)
-            
-            # پاکسازی کش پس از هر batch
-            if i % (config.batch_size * 2) == 0:
-                cleanup_cache()
+                            jalali_date, time_str = get_current_time()
+                            
+                            smart_money_flows.append({
+                                'symbol': symbol,
+                                'smart_money_amount': amount,
+                                'currency_unit': unit,
+                                'time': time_str,
+                                'raw_value': amount * (1e12 if unit == "هزار میلیارد تومان" else 
+                                                     1e9 if unit == "میلیارد تومان" else 
+                                                     1e6 if unit == "میلیون تومان" else 1)
+                            })
+                except Exception as e:
+                    logger.debug(f"خطا در پردازش {symbol}: {e}")
+                    continue
         
         # مرتب‌سازی بر اساس مقدار پول هوشمند
-        results.sort(key=lambda x: x.get('smart_money_amount', 0), reverse=True)
+        smart_money_flows.sort(key=lambda x: x['raw_value'], reverse=True)
         
-        end_time = time.time()
-        processing_time = end_time - start_time
+        processing_time = round(time.time() - start_time, 2)
+        jalali_date, time_str = get_current_time()
         
-        # آمار کلی
-        total_smart_money = sum(r.get('smart_money_amount', 0) for r in results)
-        top_movers = [r for r in results if r.get('smart_money_score', 0) >= 70]
+        # محاسبه آمار
+        significant_flows = len([f for f in smart_money_flows 
+                               if f['currency_unit'] in ['میلیارد تومان', 'هزار میلیارد تومان']])
         
-        return jsonify({
-            'status': 'success',
-            'summary': {
-                'total_symbols_processed': len(results),
-                'failed_symbols': len(failed_symbols),
-                'processing_time_seconds': round(processing_time, 2),
-                'cache_hit_rate': f"{CACHE_HITS/(CACHE_HITS+CACHE_MISSES)*100:.1f}%" if (CACHE_HITS+CACHE_MISSES) > 0 else "0%",
-                'top_movers_count': len(top_movers),
-                'total_market_value': f"{total_smart_money:.2f} (combined units)"
-            },
-            'top_10_smart_money': results[:10],
-            'top_movers': top_movers[:20],
-            'all_data': results,
-            'failed_symbols': failed_symbols,
-            'generated_at': datetime.now(pytz.timezone('Asia/Tehran')).strftime('%Y/%m/%d %H:%M:%S')
-        })
+        top_flow_amount = f"{smart_money_flows[0]['smart_money_amount']} {smart_money_flows[0]['currency_unit']}" if smart_money_flows else "0"
+        
+        logger.info(f"✅ پردازش کامل شد: {len(smart_money_flows)} جریان فعال یافت شد")
+        
+        return render_template_string(TABLE_TEMPLATE,
+            flows=smart_money_flows,
+            scan_date=jalali_date,
+            scan_time=time_str,
+            total_symbols=len(symbols),
+            active_flows=len(smart_money_flows),
+            significant_flows=significant_flows,
+            top_flow_amount=top_flow_amount,
+            processing_time=processing_time
+        )
         
     except Exception as e:
-        logger.error(f"خطای کلی در تحلیل: {e}")
-        return jsonify({
-            'status': 'error', 
-            'message': f'خطا در پردازش: {str(e)}'
-        }), 500
+        logger.error(f"خطای کلی: {e}")
+        return f"❌ خطا در پردازش: {str(e)}", 500
 
-@app.route('/quick-scan', methods=['GET'])
-def quick_scan():
-    """اسکن سریع بازار - فقط اطلاعات اصلی"""
+@app.route('/api/smart-money', methods=['GET'])
+def api_smart_money():
+    """API برای دریافت داده‌های خام"""
     try:
-        api_client = TehranStockAPI()
+        start_time = time.time()
+        api_client = StockAPI()
+        symbols = api_client.get_all_symbols()
         
-        if not ALL_SYMBOLS:
-            ALL_SYMBOLS.extend(api_client.get_all_symbols())
-        
-        # انتخاب تصادفی برای اسکن سریع
-        import random
-        sample_size = min(100, len(ALL_SYMBOLS))
-        sample_symbols = random.sample(ALL_SYMBOLS, sample_size)
-        
-        results = []
-        
-        with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
+        flows = []
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             future_to_symbol = {
-                executor.submit(fetch_stock_data_cached, symbol, api_client): symbol 
-                for symbol in sample_symbols
+                executor.submit(get_stock_data, symbol, api_client): symbol 
+                for symbol in symbols
             }
             
             for future in as_completed(future_to_symbol):
@@ -448,116 +382,49 @@ def quick_scan():
                 try:
                     stock_data = future.result()
                     if stock_data:
-                        # تحلیل ساده
-                        volume = stock_data.get('volume', 0)
-                        last_price = stock_data.get('last_price', 0)
-                        smart_money = volume * last_price
-                        
-                        if smart_money >= 1e9:  # حداقل 1 میلیارد
-                            unit = "میلیارد تومان"
-                            amount = round(smart_money / 1e9, 2)
-                        else:
-                            unit = "میلیون تومان" 
-                            amount = round(smart_money / 1e6, 2)
-                        
-                        results.append({
-                            'symbol': symbol,
-                            'smart_money': amount,
-                            'unit': unit,
-                            'time': datetime.now(pytz.timezone('Asia/Tehran')).strftime('%H:%M:%S')
-                        })
+                        amount, unit = calculate_smart_money(stock_data)
+                        if amount > 0:
+                            flows.append({
+                                'symbol': symbol,
+                                'amount': amount,
+                                'unit': unit
+                            })
                 except:
-                    pass
+                    continue
         
-        results.sort(key=lambda x: x['smart_money'], reverse=True)
+        flows.sort(key=lambda x: x['amount'], reverse=True)
+        jalali_date, time_str = get_current_time()
         
         return jsonify({
             'status': 'success',
-            'scan_type': 'quick',
-            'sample_size': len(results),
-            'top_20': results[:20],
-            'scan_time': datetime.now(pytz.timezone('Asia/Tehran')).strftime('%H:%M:%S')
+            'total_symbols': len(symbols),
+            'active_flows': len(flows),
+            'processing_time': round(time.time() - start_time, 2),
+            'scan_time': f"{jalali_date} {time_str}",
+            'flows': flows
         })
         
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """بررسی سلامت سیستم"""
+@app.route('/status', methods=['GET'])
+def status():
+    """وضعیت سیستم"""
+    jalali_date, time_str = get_current_time()
     return jsonify({
-        'status': 'healthy',
-        'cache_size': len(REQUEST_CACHE),
-        'cache_hits': CACHE_HITS,
-        'cache_misses': CACHE_MISSES,
-        'symbols_loaded': len(ALL_SYMBOLS),
-        'server_time': datetime.now(pytz.timezone('Asia/Tehran')).strftime('%Y/%m/%d %H:%M:%S')
-    })
-
-@app.route('/metrics', methods=['GET'])
-def get_metrics():
-    """متریک‌های عملکرد"""
-    avg_times = {}
-    for func_name, times in performance_metrics.items():
-        if times:
-            avg_times[func_name] = {
-                'avg_time': round(sum(times) / len(times), 4),
-                'calls': len(times),
-                'total_time': round(sum(times), 4)
-            }
-    
-    return jsonify({
-        'performance': avg_times,
-        'cache_stats': {
-            'hits': CACHE_HITS,
-            'misses': CACHE_MISSES,
-            'hit_rate': f"{CACHE_HITS/(CACHE_HITS+CACHE_MISSES)*100:.1f}%" if (CACHE_HITS+CACHE_MISSES) > 0 else "0%",
-            'cache_size': len(REQUEST_CACHE)
-        },
-        'system_info': {
-            'symbols_count': len(ALL_SYMBOLS),
-            'max_workers': config.max_workers,
-            'cache_duration': config.cache_duration
-        }
-    })
-
-# تنظیمات پیکربندی از درخواست
-@app.route('/config', methods=['POST'])
-def update_config():
-    """به‌روزرسانی تنظیمات"""
-    data = request.get_json()
-    
-    if 'max_workers' in data:
-        config.max_workers = min(max(data['max_workers'], 10), 100)
-    if 'cache_duration' in data:
-        config.cache_duration = max(data['cache_duration'], 30)
-    
-    return jsonify({
-        'status': 'updated',
-        'config': {
-            'max_workers': config.max_workers,
-            'cache_duration': config.cache_duration,
-            'batch_size': config.batch_size
-        }
+        'status': 'آنلاین ✅',
+        'cache_size': len(CACHE),
+        'current_time': f"{jalali_date} {time_str}",
+        'workers': MAX_WORKERS
     })
 
 if __name__ == '__main__':
-    # پاکسازی دوره‌ای کش
-    import threading
-    
-    def periodic_cleanup():
-        while True:
-            time.sleep(300)  # هر 5 دقیقه
-            cleanup_cache()
-    
-    cleanup_thread = threading.Thread(target=periodic_cleanup, daemon=True)
-    cleanup_thread.start()
-    
-    print("🚀 سرویس تحلیل پول هوشمند تمام سهام بورس آماده است!")
-    print("📊 Endpoints:")
-    print("  POST /analyze-all-stocks - تحلیل کامل تمام سهام")
-    print("  GET  /quick-scan - اسکن سریع بازار") 
-    print("  GET  /health - وضعیت سلامت")
-    print("  GET  /metrics - متریک‌های عملکرد")
+    print("🚀 سیستم تحلیل جریان پول هوشمند بورس تهران")
+    print("=" * 60)
+    print("📊 دسترسی به جدول: http://localhost:5000")
+    print("🔗 API داده‌ها: http://localhost:5000/api/smart-money")
+    print("⚡ وضعیت سیستم: http://localhost:5000/status")
+    print("=" * 60)
+    print("🔄 در حال راه‌اندازی...")
     
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
