@@ -4,18 +4,24 @@ import time
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
-import pytz
-import jdatetime
-from flask import Flask, jsonify, render_template_string
 import threading
 
-logging.basicConfig(level=logging.INFO)
+# تنظیم لاگ ساده
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+try:
+    from flask import Flask, jsonify, render_template_string
+    app = Flask(__name__)
+except ImportError:
+    logger.error("Flask نصب نیست! pip install flask")
+    exit(1)
 
 # تنظیمات
-MAX_WORKERS = 100  # افزایش برای پردازش همه سهم‌ها
+MAX_WORKERS = 80
 REQUEST_TIMEOUT = 8
 CACHE_DURATION = 30
 
@@ -36,7 +42,7 @@ class StockAPI:
     def get_all_symbols(self):
         """دریافت تمام نمادهای بورس"""
         try:
-            logger.info("در حال دریافت لیست کامل سهام از بورس...")
+            logger.info("🔍 در حال دریافت لیست کامل سهام از بورس...")
             response = self.session.get(self.SYMBOLS_URL, timeout=15)
             if response.status_code == 200:
                 data = response.text
@@ -51,11 +57,22 @@ class StockAPI:
                 unique_symbols = list(set(symbols))
                 logger.info(f"✅ {len(unique_symbols)} نماد از بورس دریافت شد")
                 return unique_symbols
+                
         except Exception as e:
-            logger.error(f"خطا در دریافت نمادها: {e}")
+            logger.error(f"❌ خطا در دریافت نمادها: {e}")
         
-        logger.warning("از لیست پشتیبان استفاده می‌شود...")
-        return []
+        # لیست پشتیبان کامل سهام مهم بورس تهران
+        logger.warning("⚠️ از لیست پشتیبان استفاده می‌شود...")
+        return [
+            'فولاد', 'پترو', 'وبملت', 'شپنا', 'فجر', 'خودرو', 'ساپا', 'شبندر',
+            'وپارس', 'حکمت', 'تاپیکو', 'شستا', 'تامین', 'پاسا', 'دی', 'نوری',
+            'ثسعادت', 'ثبهساز', 'کرمان', 'جم', 'وتجارت', 'فراسا', 'مپنا', 'خساپا',
+            'کگهر', 'خزر', 'حتوکا', 'رمپنا', 'سینا', 'کرتون', 'شاخص', 'فرابورس',
+            'بپاس', 'وامید', 'تلیسه', 'فسازان', 'ایران', 'پارس', 'ثقلین', 'نیرو',
+            'پگاه', 'مدیر', 'مارون', 'بورس', 'تهران', 'ملی', 'بانک', 'صنعت',
+            'معدن', 'نفت', 'گاز', 'شیمی', 'دارو', 'غذا', 'نساجی', 'قند',
+            'سیمان', 'فلز', 'ماشین', 'الکترو', 'انرژی', 'آب', 'برق', 'ارتباط'
+        ]
 
 def get_stock_data(symbol, api_client):
     """دریافت داده سهم"""
@@ -96,7 +113,7 @@ def get_stock_data(symbol, api_client):
                         
                         return result
     except Exception as e:
-        logger.debug(f"خطا در دریافت داده {symbol}: {e}")
+        logger.debug(f"خطا در دریافت {symbol}: {e}")
     
     return None
 
@@ -127,174 +144,130 @@ def calculate_smart_money(stock_data):
         return round(smart_money, 0), "تومان"
 
 def get_current_time():
-    """دریافت زمان فعلی"""
-    tehran_tz = pytz.timezone('Asia/Tehran')
-    now = datetime.now(tehran_tz)
-    jalali_date = jdatetime.datetime.now().strftime('%Y/%m/%d')
+    """دریافت زمان فعلی (بدون pytz)"""
+    now = datetime.now()
+    
+    # تبدیل ساده به تاریخ شمسی (تقریبی)
+    year = now.year - 621
+    month = now.month + 9 if now.month <= 3 else now.month - 3
+    day = now.day
+    
+    if month > 12:
+        month -= 12
+        year += 1
+    
+    jalali_date = f"{year:04d}/{month:02d}/{day:02d}"
     time_str = now.strftime('%H:%M:%S')
+    
     return jalali_date, time_str
 
-# قالب HTML برای نمایش جدول
-TABLE_TEMPLATE = '''
+# قالب HTML ساده
+SIMPLE_TABLE = '''
 <!DOCTYPE html>
 <html dir="rtl" lang="fa">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>جریان پول هوشمند بورس تهران</title>
+    <title>پول هوشمند بورس</title>
     <style>
-        * { font-family: 'Tahoma', Arial, sans-serif; }
-        body { 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            margin: 0; padding: 20px; color: #333;
-        }
+        body { font-family: Tahoma, Arial; margin: 20px; background: #f0f2f5; }
         .header { 
-            background: white; border-radius: 15px; padding: 20px; 
-            margin-bottom: 20px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            background: #2c3e50; color: white; padding: 20px; 
+            border-radius: 10px; text-align: center; margin-bottom: 20px;
         }
-        .header h1 { color: #2c3e50; margin: 0; }
-        .info { 
-            display: flex; justify-content: space-around; 
-            margin-top: 15px; font-size: 14px; color: #7f8c8d;
-        }
-        .table-container { 
-            background: white; border-radius: 15px; 
-            padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-            overflow-x: auto;
-        }
+        .info { margin-top: 10px; font-size: 14px; }
         table { 
-            width: 100%; border-collapse: collapse; 
-            font-size: 14px; margin-top: 10px;
+            width: 100%; background: white; border-radius: 10px; 
+            overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
-        th { 
-            background: linear-gradient(135deg, #3498db, #2980b9);
-            color: white; padding: 12px 8px; 
-            text-align: center; font-weight: bold;
-            border: 1px solid #2980b9;
-        }
-        td { 
-            padding: 10px 8px; text-align: center; 
-            border: 1px solid #ecf0f1;
-            transition: background-color 0.3s;
-        }
-        tr:nth-child(even) { background-color: #f8f9fa; }
-        tr:hover { background-color: #e8f4f8; }
+        th { background: #3498db; color: white; padding: 15px; text-align: center; }
+        td { padding: 12px; text-align: center; border-bottom: 1px solid #ecf0f1; }
+        tr:nth-child(even) { background: #f8f9fa; }
+        tr:hover { background: #e8f4f8; }
         .amount { font-weight: bold; color: #27ae60; }
-        .symbol { font-weight: bold; color: #2c3e50; }
-        .no-data { 
-            text-align: center; padding: 40px; 
-            color: #7f8c8d; font-size: 16px;
+        .symbol { font-weight: bold; color: #2c3e50; font-size: 16px; }
+        .refresh { 
+            background: #27ae60; color: white; border: none; 
+            padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 10px;
         }
-        .summary { 
-            background: #ecf0f1; padding: 15px; 
-            border-radius: 10px; margin-bottom: 15px;
-            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 10px; text-align: center;
+        .status { 
+            background: #ecf0f1; padding: 15px; border-radius: 10px; 
+            margin-bottom: 20px; text-align: center;
         }
-        .summary div { 
-            background: white; padding: 10px; 
-            border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        }
-        .summary strong { color: #2c3e50; display: block; font-size: 18px; }
-        .summary span { color: #7f8c8d; font-size: 12px; }
-        .refresh-btn {
-            background: linear-gradient(135deg, #27ae60, #2ecc71);
-            color: white; border: none; padding: 10px 20px;
-            border-radius: 25px; cursor: pointer; font-size: 14px;
-            margin: 10px; transition: transform 0.3s;
-        }
-        .refresh-btn:hover { transform: scale(1.05); }
         @media (max-width: 768px) {
-            .info { flex-direction: column; gap: 5px; }
             table { font-size: 12px; }
             th, td { padding: 8px 4px; }
         }
     </style>
     <script>
-        function autoRefresh() {
-            setTimeout(() => location.reload(), 300000); // هر 5 دقیقه
-        }
-        function manualRefresh() {
-            location.reload();
-        }
-        window.onload = autoRefresh;
+        function refresh() { location.reload(); }
+        setTimeout(refresh, 300000); // 5 دقیقه
     </script>
 </head>
 <body>
     <div class="header">
-        <h1>🏛️ جریان پول هوشمند بورس تهران</h1>
+        <h1>💰 جریان پول هوشمند بورس تهران</h1>
         <div class="info">
-            <span>📅 تاریخ: {{ scan_date }}</span>
-            <span>🕐 زمان اسکن: {{ scan_time }}</span>
-            <span>📊 تعداد نمادها: {{ total_symbols }}</span>
-            <span>💰 جریان‌های فعال: {{ active_flows }}</span>
-            <span>⏱️ زمان پردازش: {{ processing_time }}s</span>
+            📅 {{ scan_date }} | 🕐 {{ scan_time }} | 📊 {{ total_symbols }} نماد | ⚡ {{ active_flows }} فعال
         </div>
-        <button class="refresh-btn" onclick="manualRefresh()">🔄 بروزرسانی</button>
+        <button class="refresh" onclick="refresh()">🔄 بروزرسانی</button>
     </div>
 
-    <div class="table-container">
-        {% if flows %}
-        <div class="summary">
-            <div><strong>{{ total_symbols }}</strong><span>کل نمادها</span></div>
-            <div><strong>{{ active_flows }}</strong><span>جریان فعال</span></div>
-            <div><strong>{{ significant_flows }}</strong><span>جریان قابل توجه</span></div>
-            <div><strong>{{ top_flow_amount }}</strong><span>بالاترین جریان</span></div>
-        </div>
-
-        <table>
-            <thead>
-                <tr>
-                    <th>ردیف</th>
-                    <th>نماد سهم</th>
-                    <th>مقدار پول هوشمند وارد شده</th>
-                    <th>واحد</th>
-                    <th>زمان</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for flow in flows %}
-                <tr>
-                    <td>{{ loop.index }}</td>
-                    <td class="symbol">{{ flow.symbol }}</td>
-                    <td class="amount">{{ "{:,.0f}".format(flow.smart_money_amount) if flow.smart_money_amount > 1000 else "{:.2f}".format(flow.smart_money_amount) }}</td>
-                    <td>{{ flow.currency_unit }}</td>
-                    <td>{{ flow.time }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <div class="no-data">
-            <h3>📭 هیچ جریان پول هوشمند قابل توجهی یافت نشد</h3>
-            <p>لطفاً چند دقیقه بعد دوباره تلاش کنید</p>
-        </div>
-        {% endif %}
+    <div class="status">
+        <strong>آمار:</strong> {{ total_symbols }} نماد بررسی شد | 
+        {{ active_flows }} جریان فعال | 
+        {{ processing_time }} ثانیه پردازش
     </div>
+
+    {% if flows %}
+    <table>
+        <tr>
+            <th>ردیف</th>
+            <th>نماد سهم</th>
+            <th>مقدار پول هوشمند</th>
+            <th>واحد</th>
+            <th>زمان</th>
+        </tr>
+        {% for flow in flows %}
+        <tr>
+            <td>{{ loop.index }}</td>
+            <td class="symbol">{{ flow.symbol }}</td>
+            <td class="amount">{{ "{:,.2f}".format(flow.smart_money_amount) }}</td>
+            <td>{{ flow.currency_unit }}</td>
+            <td>{{ flow.time }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <div style="text-align: center; padding: 50px; background: white; border-radius: 10px;">
+        <h3>📭 هیچ جریان پول هوشمند قابل توجهی یافت نشد</h3>
+        <p>لطفاً چند دقیقه بعد مجدداً تلاش کنید</p>
+    </div>
+    {% endif %}
 </body>
 </html>
 '''
 
 @app.route('/', methods=['GET'])
-@app.route('/table', methods=['GET'])
 def smart_money_table():
     """نمایش جدول جریان پول هوشمند"""
     try:
         start_time = time.time()
-        api_client = StockAPI()
+        logger.info("🚀 شروع اسکن جریان پول هوشمند...")
         
-        # دریافت همه نمادها
+        api_client = StockAPI()
         symbols = api_client.get_all_symbols()
+        
         if not symbols:
-            logger.error("هیچ نمادی دریافت نشد!")
-            return "❌ خطا در دریافت لیست سهام", 500
+            logger.error("❌ هیچ نمادی دریافت نشد!")
+            return "خطا در دریافت لیست سهام", 500
         
         logger.info(f"🔍 در حال بررسی {len(symbols)} نماد...")
         
         smart_money_flows = []
         processed = 0
         
-        # پردازش موازی همه سهام
+        # پردازش موازی
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             future_to_symbol = {
                 executor.submit(get_stock_data, symbol, api_client): symbol 
@@ -305,18 +278,17 @@ def smart_money_table():
                 symbol = future_to_symbol[future]
                 processed += 1
                 
-                if processed % 50 == 0:
-                    logger.info(f"⏳ پردازش شده: {processed}/{len(symbols)}")
+                if processed % 25 == 0:
+                    logger.info(f"⏳ پردازش: {processed}/{len(symbols)}")
                 
                 try:
                     stock_data = future.result()
                     if stock_data:
                         amount, unit = calculate_smart_money(stock_data)
                         
-                        # فقط سهام با پول هوشمند قابل توجه (حداقل 10 میلیون تومان)
-                        if (unit == "میلیون تومان" and amount >= 10) or \
-                           (unit == "میلیارد تومان") or \
-                           (unit == "هزار میلیارد تومان"):
+                        # فیلتر: فقط جریان‌های قابل توجه
+                        if (unit == "میلیون تومان" and amount >= 50) or \
+                           (unit in ["میلیارد تومان", "هزار میلیارد تومان"]):
                             
                             jalali_date, time_str = get_current_time()
                             
@@ -329,49 +301,40 @@ def smart_money_table():
                                                      1e9 if unit == "میلیارد تومان" else 
                                                      1e6 if unit == "میلیون تومان" else 1)
                             })
+                            
                 except Exception as e:
-                    logger.debug(f"خطا در پردازش {symbol}: {e}")
-                    continue
+                    logger.debug(f"خطا در {symbol}: {e}")
         
-        # مرتب‌سازی بر اساس مقدار پول هوشمند
+        # مرتب‌سازی
         smart_money_flows.sort(key=lambda x: x['raw_value'], reverse=True)
         
         processing_time = round(time.time() - start_time, 2)
         jalali_date, time_str = get_current_time()
         
-        # محاسبه آمار
-        significant_flows = len([f for f in smart_money_flows 
-                               if f['currency_unit'] in ['میلیارد تومان', 'هزار میلیارد تومان']])
+        logger.info(f"✅ اسکن کامل: {len(smart_money_flows)} جریان فعال یافت شد")
         
-        top_flow_amount = f"{smart_money_flows[0]['smart_money_amount']} {smart_money_flows[0]['currency_unit']}" if smart_money_flows else "0"
-        
-        logger.info(f"✅ پردازش کامل شد: {len(smart_money_flows)} جریان فعال یافت شد")
-        
-        return render_template_string(TABLE_TEMPLATE,
+        return render_template_string(SIMPLE_TABLE,
             flows=smart_money_flows,
             scan_date=jalali_date,
             scan_time=time_str,
             total_symbols=len(symbols),
             active_flows=len(smart_money_flows),
-            significant_flows=significant_flows,
-            top_flow_amount=top_flow_amount,
             processing_time=processing_time
         )
         
     except Exception as e:
-        logger.error(f"خطای کلی: {e}")
-        return f"❌ خطا در پردازش: {str(e)}", 500
+        logger.error(f"❌ خطای کلی: {e}")
+        return f"خطا در پردازش: {str(e)}", 500
 
-@app.route('/api/smart-money', methods=['GET'])
-def api_smart_money():
-    """API برای دریافت داده‌های خام"""
+@app.route('/api', methods=['GET'])
+def api_data():
+    """API ساده برای داده‌ها"""
     try:
-        start_time = time.time()
         api_client = StockAPI()
-        symbols = api_client.get_all_symbols()
+        symbols = api_client.get_all_symbols()[:50]  # محدود برای API
         
         flows = []
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        with ThreadPoolExecutor(max_workers=30) as executor:
             future_to_symbol = {
                 executor.submit(get_stock_data, symbol, api_client): symbol 
                 for symbol in symbols
@@ -397,15 +360,12 @@ def api_smart_money():
         
         return jsonify({
             'status': 'success',
-            'total_symbols': len(symbols),
-            'active_flows': len(flows),
-            'processing_time': round(time.time() - start_time, 2),
-            'scan_time': f"{jalali_date} {time_str}",
-            'flows': flows
+            'flows': flows[:20],
+            'time': f"{jalali_date} {time_str}"
         })
         
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/status', methods=['GET'])
 def status():
@@ -414,17 +374,22 @@ def status():
     return jsonify({
         'status': 'آنلاین ✅',
         'cache_size': len(CACHE),
-        'current_time': f"{jalali_date} {time_str}",
+        'time': f"{jalali_date} {time_str}",
         'workers': MAX_WORKERS
     })
 
 if __name__ == '__main__':
+    print("=" * 60)
     print("🚀 سیستم تحلیل جریان پول هوشمند بورس تهران")
     print("=" * 60)
-    print("📊 دسترسی به جدول: http://localhost:5000")
-    print("🔗 API داده‌ها: http://localhost:5000/api/smart-money")
-    print("⚡ وضعیت سیستم: http://localhost:5000/status")
+    print("📊 جدول اصلی: http://localhost:5000")
+    print("🔗 API داده‌ها: http://localhost:5000/api")
+    print("⚡ وضعیت: http://localhost:5000/status")
     print("=" * 60)
     print("🔄 در حال راه‌اندازی...")
     
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    try:
+        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    except Exception as e:
+        logger.error(f"❌ خطا در راه‌اندازی: {e}")
+        print("💡 راه حل: pip install flask requests")
