@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 # import ماژول‌ها
 try:
-    from modules.smart_money import smart_money
+    from modules.smart_money import SmartMoneyDetector
 except ImportError as e:
     logger.error(f"خطا در import ماژول‌ها: {e}")
     exit(1)
@@ -40,19 +40,28 @@ def home():
 def smart_money_endpoint():
     """ماژول پول هوشمند"""
     try:
-        results = smart_money()
+        detector = SmartMoneyDetector()
+        results = detector.scan_symbols_from_file('symbols.txt')
+        
         jalali_date, current_time = get_current_time()
+
+        if results['status'] == 'error':
+            return jsonify({
+                'status': 'error',
+                'module': 'smart_money',
+                'timestamp': f"{jalali_date} {current_time}",
+                'message': results['message']
+            }), 400
 
         return jsonify({
             'status': 'success',
             'module': 'smart_money',
             'timestamp': f"{jalali_date} {current_time}",
-            'total_analyzed': len(results) if results else 0,
-            'data': results,
-            'summary': {
-                'top_flow': results[0] if results else None,
-                'active_flows': len([r for r in results if r['smart_money_amount'] >= 10])
-            }
+            'message': f"بررسی {results['total_symbols']} سهم انجام شد",
+            'symbols_with_smart_money': [item['symbol'] for item in results['symbols_with_smart_money']],
+            'smart_money_count': results['smart_money_count'],
+            'total_symbols': results['total_symbols'],
+            'has_smart_money': results['has_any_smart_money']
         })
 
     except Exception as e:
@@ -70,7 +79,7 @@ if __name__ == '__main__':
     print("🏠 صفحه اصلی: http://localhost:5000")
     print("💰 پول هوشمند: http://localhost:5000/smart_money")
     print("="*50)
-    
+
     try:
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
     except Exception as e:
