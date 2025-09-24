@@ -8,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 # import ماژول‌ها
 try:
-    from modules.smart_money import SmartMoneyDetector
     from modules.daily_data import DailyDataFetcher
 except ImportError as e:
     logger.error(f"خطا در import ماژول‌ها: {e}")
@@ -30,47 +29,15 @@ def get_current_time():
 def home():
     """صفحه اصلی"""
     return jsonify({
-        'message': '💰 سیستم تحلیل بورس',
+        'message': '📊 سیستم تحلیل بورس - داده‌های روز جاری',
         'modules': {
-            'smart_money': '/smart_money',
             'daily_data': '/daily_data',
             'market_summary': '/market_summary',
             'symbol_data': '/symbol_data/<symbol>'
         },
-        'usage': 'برای فراخوانی هر ماژول: /{module_name}'
+        'usage': 'برای فراخوانی هر ماژول: /{module_name}',
+        'status': 'running'
     })
-
-@app.route('/smart_money')
-def smart_money_endpoint():
-    """ماژول پول هوشمند"""
-    try:
-        detector = SmartMoneyDetector()
-        results = detector.scan_symbols_from_file('symbols.txt')
-        jalali_date, current_time = get_current_time()
-
-        if results['status'] == 'error':
-            return jsonify({
-                'status': 'error',
-                'message': results['message']
-            }), 400
-
-        return jsonify({
-            'status': 'success',
-            'module': 'smart_money',
-            'timestamp': f"{jalali_date} {current_time}",
-            'message': f"بررسی {results['total_symbols']} سهم انجام شد",
-            'symbols_with_smart_money': [item['symbol'] for item in results['symbols_with_smart_money']],
-            'smart_money_count': results['smart_money_count'],
-            'total_symbols': results['total_symbols']
-        })
-
-    except Exception as e:
-        logger.error(f"خطا در ماژول smart_money: {e}")
-        return jsonify({
-            'status': 'error',
-            'module': 'smart_money',
-            'error': str(e)
-        }), 500
 
 @app.route('/daily_data')
 def daily_data_endpoint():
@@ -193,15 +160,24 @@ def symbol_data_endpoint(symbol):
             'error': str(e)
         }), 500
 
+@app.route('/health')
+def health_check():
+    """بررسی سلامت سرویس"""
+    return jsonify({
+        'status': 'healthy',
+        'service': 'TSETMC Data API',
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    })
+
 if __name__ == '__main__':
     print("\n" + "="*50)
-    print("🚀 سیستم تحلیل بورس")
+    print("🚀 سیستم تحلیل بورس - داده‌های روز جاری")
     print("="*50)
     print("🏠 صفحه اصلی: http://localhost:5000")
-    print("💰 پول هوشمند: http://localhost:5000/smart_money")
     print("📊 داده‌های روزانه: http://localhost:5000/daily_data")
     print("📈 خلاصه بازار: http://localhost:5000/market_summary")
     print("🔍 داده نماد: http://localhost:5000/symbol_data/نماد")
+    print("❤️ Health Check: http://localhost:5000/health")
     print("="*50)
 
     try:
