@@ -2,11 +2,9 @@ from flask import Flask, jsonify
 import logging
 from datetime import datetime
 
-# تنظیم logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# import ماژول‌ها
 try:
     from modules.smart_money import SmartMoneyDetector
 except ImportError as e:
@@ -16,7 +14,6 @@ except ImportError as e:
 app = Flask(__name__)
 
 def get_current_time():
-    """زمان فعلی"""
     now = datetime.now()
     jalali_year = now.year - 621
     jalali_month = now.month + 9 if now.month <= 3 else now.month - 3
@@ -27,29 +24,22 @@ def get_current_time():
 
 @app.route('/')
 def home():
-    """صفحه اصلی"""
     return jsonify({
         'message': '💰 سیستم تحلیل بورس',
-        'modules': {
-            'smart_money': '/smart_money'
-        },
+        'modules': {'smart_money': '/smart_money'},
         'usage': 'برای فراخوانی هر ماژول: /{module_name}'
     })
 
 @app.route('/smart_money')
 def smart_money_endpoint():
-    """ماژول پول هوشمند"""
     try:
         detector = SmartMoneyDetector()
         results = detector.scan_symbols_from_file('symbols.txt')
-        
         jalali_date, current_time = get_current_time()
 
         if results['status'] == 'error':
             return jsonify({
                 'status': 'error',
-                'module': 'smart_money',
-                'timestamp': f"{jalali_date} {current_time}",
                 'message': results['message']
             }), 400
 
@@ -60,8 +50,7 @@ def smart_money_endpoint():
             'message': f"بررسی {results['total_symbols']} سهم انجام شد",
             'symbols_with_smart_money': [item['symbol'] for item in results['symbols_with_smart_money']],
             'smart_money_count': results['smart_money_count'],
-            'total_symbols': results['total_symbols'],
-            'has_smart_money': results['has_any_smart_money']
+            'total_symbols': results['total_symbols']
         })
 
     except Exception as e:
@@ -76,11 +65,4 @@ if __name__ == '__main__':
     print("\n" + "="*50)
     print("🚀 سیستم تحلیل بورس")
     print("="*50)
-    print("🏠 صفحه اصلی: http://localhost:5000")
-    print("💰 پول هوشمند: http://localhost:5000/smart_money")
-    print("="*50)
-
-    try:
-        app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
-    except Exception as e:
-        print(f"❌ خطا: {e}")
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
