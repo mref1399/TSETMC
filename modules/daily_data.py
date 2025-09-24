@@ -47,30 +47,6 @@ class DailyDataFetcher:
                     'timestamp': datetime.now().strftime('%Y/%m/%d %H:%M:%S')
                 }
 
-        except requests.exceptions.Timeout:
-            logger.error("Timeout در درخواست API")
-            return {
-                'status': 'error',
-                'message': 'Timeout در درخواست API',
-                'data': [],
-                'timestamp': datetime.now().strftime('%Y/%m/%d %H:%M:%S')
-            }
-        except requests.exceptions.RequestException as e:
-            logger.error(f"خطای شبکه: {str(e)}")
-            return {
-                'status': 'error',
-                'message': f'خطای شبکه: {str(e)}',
-                'data': [],
-                'timestamp': datetime.now().strftime('%Y/%m/%d %H:%M:%S')
-            }
-        except json.JSONDecodeError:
-            logger.error("خطا در تجزیه JSON")
-            return {
-                'status': 'error',
-                'message': 'خطا در تجزیه JSON - پاسخ معتبر نیست',
-                'data': [],
-                'timestamp': datetime.now().strftime('%Y/%m/%d %H:%M:%S')
-            }
         except Exception as e:
             logger.error(f"خطای غیرمنتظره: {str(e)}")
             return {
@@ -83,13 +59,11 @@ class DailyDataFetcher:
     def get_symbol_data(self, symbol: str) -> Dict:
         """دریافت داده‌های یک نماد خاص"""
         try:
-            # اول همه داده‌ها رو بگیر
             all_data = self.get_all_symbols_data()
             
             if all_data['status'] == 'error':
                 return all_data
             
-            # پیدا کردن نماد مورد نظر
             symbols_data = all_data['data']
             symbol_info = None
             
@@ -137,26 +111,22 @@ class DailyDataFetcher:
             if not filters:
                 filtered_data = symbols_data
             else:
-                # اعمال فیلترها
                 for sym_data in symbols_data:
                     if not isinstance(sym_data, dict):
                         continue
                     
                     match = True
                     
-                    # فیلتر حجم
                     if 'min_volume' in filters:
                         volume = sym_data.get('volume', 0)
                         if volume < filters['min_volume']:
                             match = False
                     
-                    # فیلتر قیمت
                     if 'min_price' in filters:
                         price = sym_data.get('last_price', 0)
                         if price < filters['min_price']:
                             match = False
                     
-                    # فیلتر تغییر مثبت
                     if filters.get('positive_change', False):
                         change = sym_data.get('change_percent', 0)
                         if change <= 0:
@@ -202,7 +172,6 @@ class DailyDataFetcher:
                     'summary': {}
                 }
             
-            # محاسبه آمار کلی
             total_symbols = len(symbols_data)
             positive_symbols = 0
             negative_symbols = 0
